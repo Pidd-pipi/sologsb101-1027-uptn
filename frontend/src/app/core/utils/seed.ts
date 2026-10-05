@@ -4,7 +4,8 @@
  * 三层互相引用，保证 6 个页面第一次进入都有内容。函数本身幂等：由调用方判定表是否为空。
  */
 import type { RecipeRow, MaltRow, HopRow, MashStepRow, BoilAddRow, FermentRow, PackagingRow } from './db';
-import { db, ROW_REVISION } from './db';
+import { db, ROW_REVISION, buildRevisionSnapshot } from './db';
+import { INITIAL_REVISION_NOTE } from '../models/recipe-revision.model';
 
 function rev<T>(row: T): T & { revision: number; createdAt: number; updatedAt: number } {
   const now = Date.now();
@@ -69,19 +70,59 @@ const PACKAGINGS: Array<Omit<PackagingRow, 'revision' | 'createdAt' | 'updatedAt
   { id: 'pk-003', batchNo: 'B-2403', recipeId: 'rc-003', packDate: '2024-05-02', container: '罐装', quantity: 48, carbonationVol: 2.2, abv: 6.6 }
 ];
 
-/** 灌入演示数据（配方 → 麦芽 / 酒花 / 糖化步 / 煮沸投加 → 发酵读数 → 罐装批次） */
+/** 灌入演示数据（配方 → 麦芽 / 酒花 / 糖化步 / 煮沸投加 → 发酵读数 → 罐装批次 → 初始修订快照） */
 export async function seedDatabase(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.recipes, db.malts, db.hops, db.mashSteps, db.boilAdds, db.ferments, db.packagings],
+    [db.recipes, db.malts, db.hops, db.mashSteps, db.boilAdds, db.ferments, db.packagings, db.recipeRevisions],
     async () => {
-      await db.recipes.bulkPut(RECIPES.map(rev));
-      await db.malts.bulkPut(MALTS.map(rev));
-      await db.hops.bulkPut(HOPS.map(rev));
-      await db.mashSteps.bulkPut(MASH_STEPS.map(rev));
-      await db.boilAdds.bulkPut(BOIL_ADDS.map(rev));
-      await db.ferments.bulkPut(FERMENTS.map(rev));
-      await db.packagings.bulkPut(PACKAGINGS.map(rev));
+      const recipeRows = RECIPES.map(rev);
+      const maltRows = MALTS.map(rev);
+      const hopRows = HOPS.map(rev);
+      const mashRows = MASH_STEPS.map(rev);
+      const boilRows = BOIL_ADDS.map(rev);
+      const fermentRows = FERMENTS.map(rev);
+      const packagingRows = PACKAGINGS.map(rev);
+
+      await db.recipes.bulkPut(recipeRows);
+      await db.malts.bulkPut(maltRows);
+      await db.hops.bulkPut(hopRows);
+      await db.mashSteps.bulkPut(mashRows);
+      await db.boilAdds.bulkPut(boilRows);
+      await db.ferments.bulkPut(fermentRows);
+      await db.packagings.bulkPut(packagingRows);
+
+      // 为每个配方创建初始修订快照，并把发酵 / 罐装批次绑定到该修订
+      const now = Date.now();
+      const revisionByRecipe = new Map<string, string>();
+      const revisions = recipeRows.map((recipe) => {
+        const snapshot = buildRevisionSnapshot(
+          recipe,
+          {
+            malts: maltRows.filter((item) => item.recipeId === recipe.id),
+            hops: hopRows.filter((item) => item.recipeId === recipe.id),
+            mashSteps: mashRows.filter((item) => item.recipeId === recipe.id),
+            boilAdds: boilRows.filter((item) => item.recipeId === recipe.id)
+          },
+          1,
+          INITIAL_REVISION_NOTE,
+          now
+        );
+        revisionByRecipe.set(recipe.id, snapshot.id);
+        return snapshot;
+      });
+      await db.recipeRevisions.bulkPut(revisions);
+
+      // 回写配方当前修订，并把批次绑定到初始修订
+      await Promise.all(
+        recipeRows.map((recipe) => db.recipes.update(recipe.id, { currentRevisionId: revisionByRecipe.get(recipe.id) }))
+      );
+      await Promise.all(
+        fermentRows.map((row) => db.ferments.update(row.id, { revisionId: revisionByRecipe.get(row.recipeId) }))
+      );
+      await Promise.all(
+        packagingRows.map((row) => db.packagings.update(row.id, { revisionId: revisionByRecipe.get(row.recipeId) }))
+      );
     }
   );
 }

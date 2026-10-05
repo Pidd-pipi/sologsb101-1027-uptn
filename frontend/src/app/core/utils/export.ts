@@ -9,6 +9,7 @@ import type { MashStep } from '../models/mash-step.model';
 import type { BoilAdd } from '../models/boil-add.model';
 import type { Ferment } from '../models/ferment.model';
 import type { Packaging } from '../models/packaging.model';
+import type { RecipeRevision } from '../models/recipe-revision.model';
 import { DB_NAME, DB_SCHEMA_VERSION, db } from './db';
 import { abvFromGravity, apparentAttenuation, totalGrainKg, weightedEbc } from './brew';
 import { nowIso } from './uuid';
@@ -19,6 +20,8 @@ export interface RecipeArchive {
   schemaVersion: number;
   exportedAt: string;
   recipe: Recipe;
+  /** 配方的全部修订快照（版本历史） */
+  revisions: RecipeRevision[];
   malts: Malt[];
   hops: Hop[];
   mashSteps: MashStep[];
@@ -55,7 +58,8 @@ function stripRevision<T extends WithRevision>(row: T): T {
 export async function buildRecipeArchive(recipeId: string): Promise<RecipeArchive> {
   const recipe = await db.recipes.get(recipeId);
   if (!recipe) throw new Error('配方不存在，无法导出档案');
-  const [malts, hops, mashSteps, boilAdds, ferments, packagings] = await Promise.all([
+  const [revisions, malts, hops, mashSteps, boilAdds, ferments, packagings] = await Promise.all([
+    db.recipeRevisions.where('recipeId').equals(recipeId).sortBy('revisionNo'),
     db.malts.where('recipeId').equals(recipeId).toArray(),
     db.hops.where('recipeId').equals(recipeId).toArray(),
     db.mashSteps.where('recipeId').equals(recipeId).toArray(),
@@ -72,6 +76,7 @@ export async function buildRecipeArchive(recipeId: string): Promise<RecipeArchiv
     schemaVersion: DB_SCHEMA_VERSION,
     exportedAt: nowIso(),
     recipe: stripRevision(recipe),
+    revisions: revisions.map((item) => ({ ...item })),
     malts: malts.map(stripRevision),
     hops: hops.map(stripRevision),
     mashSteps: mashSteps.map(stripRevision),

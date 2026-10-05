@@ -1,11 +1,13 @@
 /** 配方 feature reducer */
 import { createReducer, on } from '@ngrx/store';
 import type { FilterModel } from '../../models/filter.model';
-import type { RecipeRow } from '../../utils/db';
+import type { RecipeRevisionRow, RecipeRow } from '../../utils/db';
 import { RecipeActions } from './recipe.actions';
 
 export interface RecipeState {
   recipes: RecipeRow[];
+  /** 全部配方的修订快照（不可回写） */
+  revisions: RecipeRevisionRow[];
   selectedId: string | null;
   filter: FilterModel;
   loading: boolean;
@@ -14,6 +16,7 @@ export interface RecipeState {
 
 export const initialRecipeState: RecipeState = {
   recipes: [],
+  revisions: [],
   selectedId: null,
   filter: { keyword: '', styles: [] },
   loading: false,
@@ -29,6 +32,7 @@ export const recipeReducer = createReducer(
     loading: false,
     selectedId: state.selectedId ?? recipes[0]?.id ?? null
   })),
+  on(RecipeActions.loadRevisionsSuccess, (state, { revisions }) => ({ ...state, revisions })),
   on(RecipeActions.loadFailure, (state, { error }) => ({ ...state, loading: false, error })),
   on(RecipeActions.selectRecipe, (state, { id }) => ({ ...state, selectedId: id })),
   on(RecipeActions.setFilter, (state, { filter }) => ({ ...state, filter })),
@@ -36,6 +40,7 @@ export const recipeReducer = createReducer(
   on(RecipeActions.deleteRecipe, (state, { id }) => ({
     ...state,
     recipes: state.recipes.filter((item) => item.id !== id),
+    revisions: state.revisions.filter((item) => item.recipeId !== id),
     selectedId: state.selectedId === id ? null : state.selectedId
   }))
 );

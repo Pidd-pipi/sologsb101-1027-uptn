@@ -1,12 +1,15 @@
 /**
  * 配方 feature effects：把 NgRx actions 转成 Dexie 读写。
  * 所有变更动作完成后统一广播 Reload All，保证跨表数据一致。
+ * 配方或从属数据改动由 RecipeService 自动提交修订快照；
+ * 批次改绑 / 补齐绑定走 RecipeRevisionService。
  */
 import { Injectable, inject } from '@angular/core';
 import { Actions, createEffect, ofType } from '@ngrx/effects';
 import type { Action } from '@ngrx/store';
 import { catchError, exhaustMap, forkJoin, from, map, of, switchMap } from 'rxjs';
 import { RecipeService } from '../../services/recipe.service';
+import { RecipeRevisionService } from '../../services/recipe-revision.service';
 import { IngredientsActions } from '../ingredients/ingredients.actions';
 import { MashActions } from '../mash/mash.actions';
 import { BoilActions } from '../boil/boil.actions';
@@ -16,8 +19,9 @@ import { RecipeActions } from './recipe.actions';
 export class RecipeEffects {
   private readonly actions$ = inject(Actions);
   private readonly service = inject(RecipeService);
+  private readonly revisionService = inject(RecipeRevisionService);
 
-  /** 一次性加载配方主表 + 全部从属表 */
+  /** 一次性加载配方主表 + 全部从属表 + 修订快照 */
   reloadAll$ = createEffect(() =>
     this.actions$.pipe(
       ofType(RecipeActions.reloadAll),
@@ -27,10 +31,12 @@ export class RecipeEffects {
           malts: from(this.service.listMalts()),
           hops: from(this.service.listHops()),
           mashSteps: from(this.service.listMashSteps()),
-          boilAdds: from(this.service.listBoilAdds())
+          boilAdds: from(this.service.listBoilAdds()),
+          revisions: from(this.revisionService.listRevisions())
         }).pipe(
           switchMap((data) => [
             RecipeActions.loadRecipesSuccess({ recipes: data.recipes }),
+            RecipeActions.loadRevisionsSuccess({ revisions: data.revisions }),
             IngredientsActions.loadIngredientsSuccess({ malts: data.malts, hops: data.hops }),
             MashActions.loadMashStepsSuccess({ steps: data.mashSteps }),
             BoilActions.loadBoilAddsSuccess({ adds: data.boilAdds })
@@ -94,6 +100,54 @@ export class RecipeEffects {
           )
         )
       )
+    )
+  );
+
+  /** 发酵 / 罐装批次改绑到指定修订（需页面先让用户重新确认） */
+  adoptRevision$ = createEffect(() =>
+    this.actions$.pipe(
+      ofType(RecipeActions.adoptFermentRevision, RecipeActions.adoptPackagingRevision),
+      exhaustMap((action) => {
+        const task =
+          action.type === RecipeActions.adoptFermentRevision.type
+            ? this.revisionService.adoptFermentRevision(
+                (action as { fermentId: string; revisionId: string }).fermentId,
+                (action as { fermentId: string; revisionId: string }).revisionId
+              )
+            : this.revisionService.adoptPackagingRevision(
+                (action as { packagingId: string; revisionId: string }).packagingId,
+                (action as { packagingId: string; revisionId: string }).revisionId
+              );
+        return from(task).pipe(
+          map(() => RecipeActions.reloadAll()),
+          catchError((error: unknown) =>
+            of(RecipeActions.loadFailure({ error: error instanceof Error ? error.message : '改绑失败' }))
+          )
+        );
+      })
+    )
+  );
+
+  /** 补齐待核对批次的绑定 */
+  backfillBinding$ = createEffect(() =>
+    this.actions$.pipe(
+      ofType(RecipeActions.backfillFermentBinding, RecipeActions.backfillPackagingBinding),
+      exhaustMap((action) => {
+        const task =
+          action.type === RecipeActions.backfillFermentBinding.type
+            ? this.revisionService.backfillFermentBinding((action as { fermentId: string }).fermentId)
+            : this.revisionService.backfillPackagingBinding((action as { packagingId: string }).packagingId);
+        return from(task).pipe(
+          map((bound) =>
+            bound
+              ? RecipeActions.reloadAll()
+              : RecipeActions.loadFailure({ error: '该批次缺少配方修订快照，无法补齐绑定' })
+          ),
+          catchError((error: unknown) =>
+            of(RecipeActions.loadFailure({ error: error instanceof Error ? error.message : '补齐失败' }))
+          )
+        );
+      })
     )
   );
 

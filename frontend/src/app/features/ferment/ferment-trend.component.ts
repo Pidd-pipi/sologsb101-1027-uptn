@@ -31,12 +31,13 @@ import { FermentActions } from '../../core/state/ferment/ferment.actions';
 import {
   selectAllFerments,
   selectBatchNumbers,
+  selectCurrentBatchBinding,
   selectCurrentBatchFerments,
   selectCurrentBatchMetrics,
   selectFermentFilter,
   selectSelectedBatchNo
 } from '../../core/state/ferment/ferment.selectors';
-import { selectAllRecipes, selectSelectedRecipeId } from '../../core/state/recipe/recipe.selectors';
+import { selectAllRecipes, selectAllRevisions, selectSelectedRecipeId } from '../../core/state/recipe/recipe.selectors';
 import { RecipeActions } from '../../core/state/recipe/recipe.actions';
 
 @Component({
@@ -93,6 +94,26 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
                 }
               </mat-select>
             </mat-form-field>
+            @if (binding(); as info) {
+              @if (info.state === '已绑定') {
+                <span class="hint hint--revision" [class.hint--ok]="info.isLatest">
+                  绑定配方 v{{ info.revisionNo }}
+                  @if (info.isLatest) {
+                    · 当前修订
+                  } @else {
+                    · 配方已更新至 v{{ info.currentRevisionNo }}
+                  }
+                </span>
+                @if (!info.isLatest) {
+                  <button mat-stroked-button color="primary" type="button" (click)="adoptCurrentRevision()">
+                    采用新配方（需重新确认）
+                  </button>
+                }
+              } @else {
+                <span class="hint hint--warn">待核对：该批次未绑定配方修订快照，指标无法按版本归档</span>
+                <button mat-flat-button color="primary" type="button" (click)="backfillBinding()">补齐绑定</button>
+              }
+            }
             @if (metrics().diacetylCleared) {
               <span class="hint hint--ok">双乙酰已低于阈值，可升温还原完成</span>
             } @else {
@@ -250,6 +271,10 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
         background: #e2f0d9;
         color: #2f5a24;
       }
+      .hint--revision {
+        background: #e7eef6;
+        color: #2c4a6b;
+      }
       .hint--warn {
         background: #fbe6c8;
         color: #7a4a12;
@@ -308,6 +333,19 @@ export class FermentTrendComponent implements OnInit {
   readonly allFerments = this.store.selectSignal(selectAllFerments);
 
   readonly currentReadings = this.store.selectSignal(selectCurrentBatchFerments);
+  /** 当前批次的绑定状态（已绑定 / 待核对） */
+  readonly binding = this.store.selectSignal(selectCurrentBatchBinding);
+  private readonly revisions = this.store.selectSignal(selectAllRevisions);
+
+  /** 当前批次配方的最新修订（采用新配方时改绑的目标） */
+  readonly currentRevision = computed(() => {
+    const recipeId = this.currentReadings()[0]?.recipeId;
+    if (!recipeId) return null;
+    const own = this.revisions()
+      .filter((item) => item.recipeId === recipeId)
+      .sort((a, b) => b.revisionNo - a.revisionNo);
+    return own[0] ?? null;
+  });
 
   readonly selects: FilterSelectConfig[] = [
     { key: 'states', label: '阶段', options: FERMENT_STATES.map((state) => ({ label: state, value: state })) }
@@ -333,6 +371,38 @@ export class FermentTrendComponent implements OnInit {
     this.store.dispatch(FermentActions.selectBatch({ batchNo }));
   }
 
+  /** 采用新配方：把当前批次改绑到最新修订（需重新确认） */
+  adoptCurrentRevision(): void {
+    const readings = this.currentReadings();
+    const current = this.currentRevision();
+    if (readings.length === 0 || !current) {
+      this.snack.open('当前批次缺少读数或配方修订，无法改绑', '关闭', { duration: 2200 });
+      return;
+    }
+    const batchNo = readings[0].batchNo;
+    if (
+      !window.confirm(
+        `采用新配方将把批次「${batchNo}」绑定到配方 v${current.revisionNo}。\n改绑后该批次的目标值与归档按新修订计算，是否继续？`
+      )
+    ) {
+      return;
+    }
+    for (const reading of readings) {
+      this.store.dispatch(RecipeActions.adoptFermentRevision({ fermentId: reading.id, revisionId: current.id }));
+    }
+    this.snack.open(`批次「${batchNo}」已改绑到配方 v${current.revisionNo}`, '关闭', { duration: 2200 });
+  }
+
+  /** 补齐绑定：把待核对批次绑定到配方当前修订 */
+  backfillBinding(): void {
+    const readings = this.currentReadings();
+    if (readings.length === 0) return;
+    readings.forEach((reading) => {
+      this.store.dispatch(RecipeActions.backfillFermentBinding({ fermentId: reading.id }));
+    });
+    this.snack.open('已尝试补齐绑定', '关闭', { duration: 1800 });
+  }
+
   declineOf(date: string): number {
     const point = this.metrics().points.find((item) => item.date === date);
     return point ? point.declinePerDay : 0;
@@ -351,6 +421,16 @@ export class FermentTrendComponent implements OnInit {
     this.form = createEmptyFerment();
     this.form.recipeId = this.selectedRecipeId() ?? this.recipes()[0]?.id ?? '';
     this.form.batchNo = this.selectedBatchNo() ?? '';
+    // 新读数绑定到批次已有读数的修订（保持批次一致）；新批次则绑定配方当前修订
+    const existingRevision = this.currentReadings().find((item) => item.revisionId)?.revisionId;
+    if (existingRevision) {
+      this.form.revisionId = existingRevision;
+    } else {
+      const current = this.revisions()
+        .filter((item) => item.recipeId === this.form.recipeId)
+        .sort((a, b) => b.revisionNo - a.revisionNo)[0];
+      this.form.revisionId = current?.id;
+    }
     this.formVisible = true;
   }
 

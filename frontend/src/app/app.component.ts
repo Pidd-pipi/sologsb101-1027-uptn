@@ -13,8 +13,8 @@ import { RecipeActions } from './core/state/recipe/recipe.actions';
 import { FermentActions } from './core/state/ferment/ferment.actions';
 import { selectRecipeError } from './core/state/recipe/recipe.selectors';
 import { selectAllRecipes } from './core/state/recipe/recipe.selectors';
-import { selectAllFerments } from './core/state/ferment/ferment.selectors';
-import { selectAllPackagings } from './core/state/packaging/packaging.selectors';
+import { selectAllFerments, selectPendingFerments } from './core/state/ferment/ferment.selectors';
+import { selectAllPackagings, selectPendingPackagings } from './core/state/packaging/packaging.selectors';
 import { selectAllMalts, selectAllHops } from './core/state/ingredients/ingredients.selectors';
 import { countAll, DB_NAME, DB_SCHEMA_VERSION, initDatabase } from './core/utils/db';
 
@@ -63,6 +63,9 @@ import { countAll, DB_NAME, DB_SCHEMA_VERSION, initDatabase } from './core/utils
           <div>本地库 {{ dbName }} · v{{ schemaVersion }}</div>
           <div>配方 {{ recipeCount() }} · 麦芽 {{ maltCount() }} · 酒花 {{ hopCount() }}</div>
           <div>发酵读数 {{ fermentCount() }} · 罐装 {{ packagingCount() }}</div>
+          @if (pendingCount() > 0) {
+            <div class="shell__pending">待核对 {{ pendingCount() }} 条（拦住罐装）</div>
+          }
           <div>{{ dbReady() ? '本地库已就绪' : '正在打开本地库…' }}</div>
         </div>
       </mat-sidenav>
@@ -140,6 +143,10 @@ import { countAll, DB_NAME, DB_SCHEMA_VERSION, initDatabase } from './core/utils
         padding: 8px 14px;
         font-size: 13px;
       }
+      .shell__pending {
+        color: #f0b2a8;
+        font-weight: 600;
+      }
       .shell__main {
         padding: 18px 20px 32px;
       }
@@ -167,6 +174,10 @@ export class AppComponent implements OnInit {
   readonly hopCount = computed(() => this.store.selectSignal(selectAllHops)());
   readonly fermentCount = computed(() => this.store.selectSignal(selectAllFerments)());
   readonly packagingCount = computed(() => this.store.selectSignal(selectAllPackagings)());
+  /** 待核对（补不齐修订快照）的发酵读数 + 罐装批次总数 */
+  readonly pendingCount = computed(
+    () => this.store.selectSignal(selectPendingFerments)().length + this.store.selectSignal(selectPendingPackagings)().length
+  );
 
   ngOnInit(): void {
     void (async () => {

@@ -19,16 +19,23 @@ import { BEER_STYLES, createEmptyRecipe, type Recipe } from '../../core/models/r
 import { filtersToQueryParams, queryParamsToFilters, type FilterModel, type FilterSelectConfig } from '../../core/models/filter.model';
 import { RecipeActions } from '../../core/state/recipe/recipe.actions';
 import {
+  selectAllRevisions,
+  selectCurrentRevisionNo,
   selectFilteredRecipes,
   selectRecipeError,
   selectRecipeFilter,
   selectRecipeLoading,
+  selectRevisionsByRecipe,
   selectSelectedRecipe
 } from '../../core/state/recipe/recipe.selectors';
 import { selectAllMalts } from '../../core/state/ingredients/ingredients.selectors';
-import { selectAllFerments } from '../../core/state/ferment/ferment.selectors';
-import { selectAllPackagings } from '../../core/state/packaging/packaging.selectors';
+import { selectAllFerments, selectFermentCountByRevision } from '../../core/state/ferment/ferment.selectors';
+import {
+  selectAllPackagings,
+  selectPackagingCountByRevision
+} from '../../core/state/packaging/packaging.selectors';
 import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from '../../core/utils/brew';
+import type { RecipeRevisionRow } from '../../core/utils/db';
 
 @Component({
   selector: 'app-recipe-list',
@@ -49,6 +56,34 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
     StyleTagComponent
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  styles: [
+    `
+      .revision-badge {
+        display: inline-block;
+        margin-left: 8px;
+        padding: 1px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        background: #eef3ea;
+        color: #3f6b3a;
+        border: 1px solid #cdd9c4;
+        vertical-align: middle;
+      }
+      .revision-badge--current {
+        background: #3f6b3a;
+        color: #fff;
+        border-color: #3f6b3a;
+      }
+      .revision-history {
+        margin-top: 16px;
+      }
+      .revision-history .data-table td,
+      .revision-history .data-table th {
+        white-space: nowrap;
+      }
+    `
+  ],
   template: `
     <div class="page">
       <div class="page__head">
@@ -101,6 +136,9 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
                 <mat-card-subtitle>
                   <app-style-tag [value]="recipe.style"></app-style-tag>
                   <span class="muted">批次 {{ recipe.batchSizeL }} L</span>
+                  <span class="revision-badge" [class.revision-badge--current]="isCurrentRevision(recipe.id, recipe.currentRevisionId)">
+                    当前 v{{ currentRevisionNo(recipe.id) }}
+                  </span>
                 </mat-card-subtitle>
               </mat-card-header>
               <mat-card-content>
@@ -143,6 +181,58 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
             </mat-card>
           }
         </div>
+      }
+
+      @if (selected(); as current) {
+        <mat-card appearance="outlined" class="revision-history">
+          <mat-card-header>
+            <mat-card-title>版本历史与影响范围 · {{ current.name }}</mat-card-title>
+            <mat-card-subtitle>
+              每次配方改动都会追加一条不可回写的修订快照；进行中的发酵 / 罐装批次继续绑定原修订，不会被重算。
+            </mat-card-subtitle>
+          </mat-card-header>
+          <mat-card-content>
+            @if (revisionsOfSelected().length === 0) {
+              <p class="muted">该配方还没有修订快照。</p>
+            } @else {
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>版本</th>
+                    <th>创建时间</th>
+                    <th>说明</th>
+                    <th>麦芽</th>
+                    <th>酒花</th>
+                    <th>糖化步</th>
+                    <th>煮沸投加</th>
+                    <th>绑定发酵批次</th>
+                    <th>绑定罐装批次</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (rev of revisionsOfSelected(); track rev.id) {
+                    <tr>
+                      <td>
+                        <strong>v{{ rev.revisionNo }}</strong>
+                        @if (rev.id === current.currentRevisionId) {
+                          <span class="revision-badge revision-badge--current">当前</span>
+                        }
+                      </td>
+                      <td>{{ formatTime(rev.createdAt) }}</td>
+                      <td>{{ rev.note }}</td>
+                      <td>{{ rev.malts.length }} 条</td>
+                      <td>{{ rev.hops.length }} 条</td>
+                      <td>{{ rev.mashSteps.length }} 步</td>
+                      <td>{{ rev.boilAdds.length }} 条</td>
+                      <td>{{ fermentCountOf(rev.id) }} 个读数</td>
+                      <td>{{ packagingCountOf(rev.id) }} 个批次</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            }
+          </mat-card-content>
+        </mat-card>
       }
 
       @if (formVisible) {
@@ -211,6 +301,18 @@ export class RecipeListComponent implements OnInit {
   private readonly allMalts = this.store.selectSignal(selectAllMalts);
   private readonly allFerments = this.store.selectSignal(selectAllFerments);
   private readonly allPackagings = this.store.selectSignal(selectAllPackagings);
+  private readonly allRevisions = this.store.selectSignal(selectAllRevisions);
+  private readonly fermentCounts = this.store.selectSignal(selectFermentCountByRevision);
+  private readonly packagingCounts = this.store.selectSignal(selectPackagingCountByRevision);
+
+  /** 当前选中配方的修订快照（按修订序号升序） */
+  readonly revisionsOfSelected = computed(() => {
+    const id = this.selected()?.id;
+    if (!id) return [] as RecipeRevisionRow[];
+    return this.allRevisions()
+      .filter((item) => item.recipeId === id)
+      .sort((a, b) => a.revisionNo - b.revisionNo);
+  });
 
   formVisible = false;
   editingId: string | null = null;
@@ -283,6 +385,39 @@ export class RecipeListComponent implements OnInit {
     const malts = this.allMalts().filter((item) => item.recipeId === recipe.id);
     if (malts.length === 0) return 0;
     return ebcDeviation(malts, recipe.targetEbc);
+  }
+
+  /** 某配方的当前修订序号（无修订时为 0） */
+  currentRevisionNo(recipeId: string): number {
+    const list = this.allRevisions()
+      .filter((item) => item.recipeId === recipeId)
+      .sort((a, b) => b.revisionNo - a.revisionNo);
+    return list[0]?.revisionNo ?? 0;
+  }
+
+  /** 某修订是否为配方当前生效的修订 */
+  isCurrentRevision(recipeId: string, revisionId?: string): boolean {
+    if (!revisionId) return false;
+    const list = this.allRevisions()
+      .filter((item) => item.recipeId === recipeId)
+      .sort((a, b) => b.revisionNo - a.revisionNo);
+    return list[0]?.id === revisionId;
+  }
+
+  /** 绑定到某修订的发酵读数条数（影响范围） */
+  fermentCountOf(revisionId: string): number {
+    return this.fermentCounts()[revisionId] ?? 0;
+  }
+
+  /** 绑定到某修订的罐装批次数（影响范围） */
+  packagingCountOf(revisionId: string): number {
+    return this.packagingCounts()[revisionId] ?? 0;
+  }
+
+  formatTime(ts: number): string {
+    const d = new Date(ts);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
 
   select(id: string): void {

@@ -106,9 +106,10 @@ sologsb101-1027/
 
 ## 六、数据存储说明
 
-- **IndexedDB 库名**：`gbbrewhouse-db`（Dexie 封装），结构版本号 `version(1)`，并带 `upgrade()` 迁移逻辑（为历史行补齐行修订号与时间戳）。
-- **分表存储**：`recipes` 配方、`malts` 麦芽、`hops` 酒花、`mashSteps` 糖化步、`boilAdds` 煮沸投加、`ferments` 发酵读数、`packagings` 罐装批次，共 7 张表；每行带 `revision` / `createdAt` / `updatedAt`。
-- **首屏自动播种**：`core/utils/db.ts` 的 `initDatabase()` 在 `recipes` 表为空时调用 `seedDatabase()`，灌入互相引用的三层演示数据（配方 → 麦芽/酒花/糖化步/煮沸投加 → 发酵读数 → 罐装批次），保证 6 个页面首次打开都有内容；播种幂等。
+- **IndexedDB 库名**：`gbbrewhouse-db`（Dexie 封装），结构版本号 `version(2)`，并带 `upgrade()` 迁移逻辑（v1→v2 为历史配方补齐修订快照、为旧发酵/罐装批次补齐绑定）。
+- **分表存储**：`recipes` 配方、`malts` 麦芽、`hops` 酒花、`mashSteps` 糖化步、`boilAdds` 煮沸投加、`ferments` 发酵读数、`packagings` 罐装批次、`recipeRevisions` 配方修订快照，共 8 张表；业务行带 `revision` / `createdAt` / `updatedAt`，修订快照不可回写（无 `updatedAt`）。
+- **配方修订快照**：配方或其麦芽/酒花/糖化步/煮沸投加的任何增删改，都会由 `RecipeService` 在同一操作后调用 `commitRecipeRevision()` 追加一条不可回写的修订快照（冻结配方目标值与四类从属数据，修订序号递增）。发酵/罐装批次通过 `revisionId` 绑定到具体修订，按绑定修订的目标值计算，配方后续改动不会重算旧批次；批次要采用新配方时须在发酵页「采用新配方（需重新确认）」改绑。补不齐快照的批次显示「待核对」并在罐装页拦住罐装，可在页面「补齐绑定」。
+- **首屏自动播种**：`core/utils/db.ts` 的 `initDatabase()` 在 `recipes` 表为空时调用 `seedDatabase()`，灌入互相引用的三层演示数据（配方 → 麦芽/酒花/糖化步/煮沸投加 → 发酵读数 → 罐装批次 → 初始修订快照），保证 6 个页面首次打开都有内容；播种幂等。
 - **状态流**：页面只 `dispatch` NgRx actions 并 `select` 状态流，所有读写最终由 `core/services/recipe.service.ts` → `IdbTableService` → Dexie 落库，跨页状态不留在组件字段。
 - **无后端**：没有 API 服务、没有数据库容器；容器本身无状态，不挂载任何卷。
-- **级联规则**：删除配方会级联删除其麦芽、酒花、糖化步、煮沸投加、发酵读数与罐装批次。
+- **级联规则**：删除配方会级联删除其麦芽、酒花、糖化步、煮沸投加、发酵读数、罐装批次与全部修订快照。

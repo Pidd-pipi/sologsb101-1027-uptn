@@ -22,11 +22,17 @@ import {
   type FilterSelectConfig
 } from '../../core/models/filter.model';
 import { PackagingActions } from '../../core/state/packaging/packaging.actions';
-import { selectAllPackagings, selectFilteredPackagings, selectPackagingFilter } from '../../core/state/packaging/packaging.selectors';
+import {
+  selectAllPackagings,
+  selectFilteredPackagings,
+  selectPackagingFilter,
+  selectPendingPackagings
+} from '../../core/state/packaging/packaging.selectors';
 import { selectAllFerments } from '../../core/state/ferment/ferment.selectors';
-import { selectAllRecipes, selectSelectedRecipeId } from '../../core/state/recipe/recipe.selectors';
+import { selectAllRecipes, selectAllRevisions, selectSelectedRecipeId } from '../../core/state/recipe/recipe.selectors';
 import { RecipeActions } from '../../core/state/recipe/recipe.actions';
 import { FermentActions } from '../../core/state/ferment/ferment.actions';
+import type { BindingInfo } from '../../core/utils/revision-binding';
 import {
   countAll,
   DB_NAME,
@@ -111,6 +117,7 @@ import { abvFromGravity } from '../../core/utils/brew';
                 <tr>
                   <th>批次号</th>
                   <th>配方</th>
+                  <th>绑定版本</th>
                   <th>罐装日期</th>
                   <th>容器</th>
                   <th>数量</th>
@@ -125,6 +132,19 @@ import { abvFromGravity } from '../../core/utils/brew';
                   <tr>
                     <td>{{ row.batchNo }}</td>
                     <td>{{ recipeName(row.recipeId) }}</td>
+                    <td>
+                      @if (bindingOf(row.id); as info) {
+                        @if (info.state === '已绑定') {
+                          <span class="revision-badge" [class.revision-badge--current]="info.isLatest">v{{ info.revisionNo }}</span>
+                          @if (!info.isLatest) {
+                            <span class="muted">（当前 v{{ info.currentRevisionNo }}）</span>
+                          }
+                        } @else {
+                          <span class="pending-badge">待核对</span>
+                          <button mat-button color="primary" type="button" (click)="backfill(row)">补齐</button>
+                        }
+                      }
+                    </td>
                     <td>{{ row.packDate }}</td>
                     <td>{{ row.container }}</td>
                     <td>{{ row.quantity }}</td>
@@ -186,11 +206,24 @@ import { abvFromGravity } from '../../core/utils/brew';
               </mat-form-field>
             </div>
             <p class="muted">提示：选择批次号后会自动按该批次发酵读数回算 ABV（当前建议值 {{ suggestedAbv() }} %vol）。</p>
+            <p class="binding-line">
+              @if (formBinding(); as info) {
+                @if (info.state === '已绑定') {
+                  <span class="revision-badge revision-badge--current">将绑定配方 v{{ info.revisionNo }}</span>
+                  <span class="muted">罐装实绩按该修订归档，配方后续改动不影响本批次。</span>
+                } @else {
+                  <span class="pending-badge">待核对</span>
+                  <span class="binding-warn">该配方缺少修订快照，无法罐装，请先在配方页确认配方已保存为修订。</span>
+                }
+              } @else {
+                <span class="muted">选择配方后自动绑定到当前修订。</span>
+              }
+            </p>
           </mat-card-content>
           <mat-card-actions align="end">
             <button mat-button type="button" (click)="formVisible = false">取消</button>
             <button mat-button type="button" (click)="fillAbv()">按读数回算 ABV</button>
-            <button mat-flat-button color="primary" type="button" (click)="submit()">保存</button>
+            <button mat-flat-button color="primary" type="button" (click)="submit()" [disabled]="!canPackage()">保存</button>
           </mat-card-actions>
         </mat-card>
       }
@@ -287,6 +320,41 @@ import { abvFromGravity } from '../../core/utils/brew';
         font-size: 12px;
         margin-bottom: 8px;
       }
+      .revision-badge {
+        display: inline-block;
+        padding: 1px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        background: #eef3ea;
+        color: #3f6b3a;
+        border: 1px solid #cdd9c4;
+      }
+      .revision-badge--current {
+        background: #3f6b3a;
+        color: #fff;
+        border-color: #3f6b3a;
+      }
+      .pending-badge {
+        display: inline-block;
+        padding: 1px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+        background: #fdecea;
+        color: #a5281b;
+        border: 1px solid #f5c6c0;
+      }
+      .binding-line {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 4px 0 0;
+      }
+      .binding-warn {
+        color: #a5281b;
+        font-size: 12px;
+      }
     `
   ]
 })
@@ -304,8 +372,40 @@ export class PackagingListComponent implements OnInit {
   readonly allPackagings = this.store.selectSignal(selectAllPackagings);
   readonly filter = this.store.selectSignal(selectPackagingFilter);
   readonly recipes = this.store.selectSignal(selectAllRecipes);
+  readonly revisions = this.store.selectSignal(selectAllRevisions);
   readonly selectedRecipeId = this.store.selectSignal(selectSelectedRecipeId);
   private readonly ferments = this.store.selectSignal(selectAllFerments);
+  private readonly pendingPackagings = this.store.selectSignal(selectPendingPackagings);
+
+  /** 表单所选配方的绑定状态（决定是否允许罐装）。方法形式：随 ngModel 变更检测重算 */
+  formBinding(): BindingInfo | null {
+    const recipeId = this.form.recipeId;
+    if (!recipeId) return null;
+    const own = this.revisions()
+      .filter((item) => item.recipeId === recipeId)
+      .sort((a, b) => b.revisionNo - a.revisionNo);
+    const current = own[0] ?? null;
+    // 编辑时优先显示该行已绑定的修订；新建时绑定当前修订
+    const bound = this.form.revisionId
+      ? this.revisions().find((item) => item.id === this.form.revisionId && item.recipeId === recipeId) ?? null
+      : current;
+    if (!bound) {
+      return { state: '待核对', revision: null, revisionNo: null, currentRevisionNo: current?.revisionNo ?? null, currentRevisionId: current?.id ?? null, isLatest: false };
+    }
+    return {
+      state: '已绑定',
+      revision: bound,
+      revisionNo: bound.revisionNo,
+      currentRevisionNo: current?.revisionNo ?? bound.revisionNo,
+      currentRevisionId: current?.id ?? bound.id,
+      isLatest: current ? bound.id === current.id : true
+    };
+  }
+
+  /** 表单所选配方是否允许罐装（存在当前修订快照） */
+  canPackage(): boolean {
+    return this.formBinding()?.state === '已绑定';
+  }
 
   readonly selects: FilterSelectConfig[] = [
     { key: 'containers', label: '容器', options: CONTAINER_TYPES.map((item) => ({ label: item, value: item })) }
@@ -362,6 +462,41 @@ export class PackagingListComponent implements OnInit {
     return this.recipes().find((item) => item.id === recipeId)?.name ?? '配方已删除';
   }
 
+  /** 某条罐装批次的绑定状态 */
+  bindingOf(packagingId: string): BindingInfo | null {
+    const row = this.allPackagings().find((item) => item.id === packagingId);
+    if (!row) return null;
+    const own = this.revisions()
+      .filter((item) => item.recipeId === row.recipeId)
+      .sort((a, b) => b.revisionNo - a.revisionNo);
+    const current = own[0] ?? null;
+    const bound = row.revisionId ? this.revisions().find((item) => item.id === row.revisionId && item.recipeId === row.recipeId) ?? null : null;
+    if (!bound) {
+      return {
+        state: '待核对',
+        revision: null,
+        revisionNo: null,
+        currentRevisionNo: current?.revisionNo ?? null,
+        currentRevisionId: current?.id ?? null,
+        isLatest: false
+      };
+    }
+    return {
+      state: '已绑定',
+      revision: bound,
+      revisionNo: bound.revisionNo,
+      currentRevisionNo: current?.revisionNo ?? bound.revisionNo,
+      currentRevisionId: current?.id ?? bound.id,
+      isLatest: current ? bound.id === current.id : true
+    };
+  }
+
+  /** 补齐待核对批次的绑定 */
+  backfill(row: PackagingRow): void {
+    this.store.dispatch(RecipeActions.backfillPackagingBinding({ packagingId: row.id }));
+    this.snack.open('已尝试补齐绑定', '关闭', { duration: 1800 });
+  }
+
   private realized(recipeId: string): { og: number; fg: number } {
     const rows = this.ferments()
       .filter((item) => item.recipeId === recipeId)
@@ -400,6 +535,11 @@ export class PackagingListComponent implements OnInit {
     this.form.recipeId = this.selectedRecipeId() ?? this.recipes()[0]?.id ?? '';
     this.form.batchNo = this.ferments()[0]?.batchNo ?? '';
     this.form.abv = this.abvForBatch(this.form.batchNo, this.form.recipeId);
+    // 绑定到所选配方的当前修订；缺修订时保持待核对，submit 会拦住罐装
+    const current = this.revisions()
+      .filter((item) => item.recipeId === this.form.recipeId)
+      .sort((a, b) => b.revisionNo - a.revisionNo)[0];
+    this.form.revisionId = current?.id;
     this.formVisible = true;
   }
 
@@ -408,6 +548,7 @@ export class PackagingListComponent implements OnInit {
     this.form = {
       batchNo: row.batchNo,
       recipeId: row.recipeId,
+      revisionId: row.revisionId,
       packDate: row.packDate,
       container: row.container,
       quantity: row.quantity,
@@ -420,6 +561,11 @@ export class PackagingListComponent implements OnInit {
   submit(): void {
     if (!this.form.recipeId || !this.form.batchNo.trim()) {
       this.snack.open('请选择配方并填写批次号', '关闭', { duration: 2200 });
+      return;
+    }
+    // 待核对拦住罐装：配方缺少修订快照时不允许登记罐装
+    if (!this.canPackage()) {
+      this.snack.open('该配方缺少修订快照（待核对），无法罐装', '关闭', { duration: 2800 });
       return;
     }
     if (this.editingId) {

@@ -32,6 +32,7 @@
     "@angular-devkit/build-angular": "^18.2.0",
     "@angular/cli": "^18.2.0",
     "@angular/compiler-cli": "^18.2.0",
+    "fake-indexeddb": "^6.2.5",
     "typescript": "~5.5.4"
   }
 }

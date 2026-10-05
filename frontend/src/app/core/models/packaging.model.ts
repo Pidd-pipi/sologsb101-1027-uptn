@@ -8,6 +8,8 @@ export interface Packaging {
   batchNo: string;
   /** 所属配方 */
   recipeId: string;
+  /** 绑定的配方修订快照 id：罐装实绩按该修订归档；缺省表示待核对，待核对批次拦住罐装 */
+  revisionId?: string;
   /** 罐装日期 */
   packDate: string;
   /** 容器 */

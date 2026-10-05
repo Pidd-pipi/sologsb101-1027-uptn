@@ -6,8 +6,13 @@ import { Injectable } from '@angular/core';
 import { combineLatest, map, type Observable } from 'rxjs';
 import type { Ferment } from '../models/ferment.model';
 import { DIACETYL_THRESHOLD } from '../models/ferment.model';
-import type { Recipe } from '../models/recipe.model';
 import { abvFromGravity, apparentAttenuation, isOverTemp, potentialAbv } from '../utils/brew';
+
+/** 计算所需的配方目标（修订快照只冻结目标值，故用结构化最小类型） */
+export interface GravityTargets {
+  targetOg: number;
+  targetFg: number;
+}
 
 /** 单个趋势点 */
 export interface GravityPoint {
@@ -72,15 +77,15 @@ export class GravityTrendService {
     );
   }
 
-  /** 用 combineLatest 把「读数 + 配方」派生成完整指标 */
-  combine(ferments$: Observable<Ferment[]>, recipe$: Observable<Recipe | null>): Observable<GravityMetrics> {
+  /** 用 combineLatest 把「读数 + 配方目标」派生成完整指标 */
+  combine(ferments$: Observable<Ferment[]>, recipe$: Observable<GravityTargets | null>): Observable<GravityMetrics> {
     return combineLatest([ferments$, recipe$]).pipe(
       map(([ferments, recipe]) => GravityTrendService.calculate(ferments, recipe))
     );
   }
 
   /** 纯函数实现：便于单元测试与模板内直接调用 */
-  static calculate(ferments: Ferment[], recipe: Recipe | null): GravityMetrics {
+  static calculate(ferments: Ferment[], recipe: GravityTargets | null): GravityMetrics {
     if (ferments.length === 0 && !recipe) return { ...EMPTY_METRICS };
     const sorted = [...ferments].sort((a, b) => a.date.localeCompare(b.date));
     const points: GravityPoint[] = sorted.map((row, index) => {

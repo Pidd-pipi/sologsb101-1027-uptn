@@ -8,6 +8,8 @@ export interface Ferment {
   batchNo: string;
   /** 所属配方 */
   recipeId: string;
+  /** 绑定的配方修订快照 id：批次按该修订的目标值计算，配方后续改动不重算旧批次；缺省表示待核对 */
+  revisionId?: string;
   /** 日期 YYYY-MM-DD */
   date: string;
   /** 比重 */
