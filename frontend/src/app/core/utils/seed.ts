@@ -2,9 +2,20 @@
  * 首次打开应用时灌入的演示数据
  * 只在 recipes 表为空时执行。配方 → 麦芽 / 酒花 / 糖化步 / 煮沸投加 → 发酵读数 → 罐装批次
  * 三层互相引用，保证 6 个页面第一次进入都有内容。函数本身幂等：由调用方判定表是否为空。
+ * 同步灌入配方修订快照（每个配方一条 v1 不可回写快照）与批次绑定（演示批次全部绑定 v1）。
  */
-import type { RecipeRow, MaltRow, HopRow, MashStepRow, BoilAddRow, FermentRow, PackagingRow } from './db';
-import { db, ROW_REVISION } from './db';
+import type {
+  RecipeRow,
+  MaltRow,
+  HopRow,
+  MashStepRow,
+  BoilAddRow,
+  FermentRow,
+  PackagingRow,
+  RecipeRevisionRow,
+  BatchBindingRow
+} from './db';
+import { clearAllTables, db, ROW_REVISION } from './db';
 
 function rev<T>(row: T): T & { revision: number; createdAt: number; updatedAt: number } {
   const now = Date.now();
@@ -69,11 +80,65 @@ const PACKAGINGS: Array<Omit<PackagingRow, 'revision' | 'createdAt' | 'updatedAt
   { id: 'pk-003', batchNo: 'B-2403', recipeId: 'rc-003', packDate: '2024-05-02', container: '罐装', quantity: 48, carbonationVol: 2.2, abv: 6.6 }
 ];
 
+/** 批次号 → 配方（演示数据中每个批次号固定对应一个配方） */
+const BATCH_RECIPE: Record<string, string> = {
+  'B-2401': 'rc-001',
+  'B-2402': 'rc-002',
+  'B-2403': 'rc-003'
+};
+
+/** 为每个配方生成不可回写的 v1 修订快照 */
+function buildRevisions(): RecipeRevisionRow[] {
+  const now = Date.now();
+  return RECIPES.map((recipe) => ({
+    id: `rv-seed-${recipe.id}`,
+    recipeId: recipe.id,
+    revisionNo: 1,
+    note: '初始修订：配方建档时的目标值、麦芽、酒花、糖化步与煮沸投加快照',
+    createdAt: now,
+    recipe: { ...recipe },
+    malts: MALTS.filter((item) => item.recipeId === recipe.id).map((item) => ({ ...item })),
+    hops: HOPS.filter((item) => item.recipeId === recipe.id).map((item) => ({ ...item })),
+    mashSteps: MASH_STEPS.filter((item) => item.recipeId === recipe.id)
+      .map((item) => ({ ...item }))
+      .sort((a, b) => a.seq - b.seq),
+    boilAdds: BOIL_ADDS.filter((item) => item.recipeId === recipe.id).map((item) => ({ ...item }))
+  }));
+}
+
+/** 为每个演示批次生成绑定到 v1 修订的批次绑定 */
+function buildBindings(): BatchBindingRow[] {
+  const now = Date.now();
+  return Object.entries(BATCH_RECIPE).map(([batchNo, recipeId]) => ({
+    id: `bd-seed-${batchNo}`,
+    batchNo,
+    recipeId,
+    revisionId: `rv-seed-${recipeId}`,
+    revisionNo: 1,
+    status: '已绑定',
+    note: '建档时绑定初始修订',
+    boundAt: now,
+    revision: ROW_REVISION,
+    createdAt: now,
+    updatedAt: now
+  }));
+}
+
 /** 灌入演示数据（配方 → 麦芽 / 酒花 / 糖化步 / 煮沸投加 → 发酵读数 → 罐装批次） */
 export async function seedDatabase(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.recipes, db.malts, db.hops, db.mashSteps, db.boilAdds, db.ferments, db.packagings],
+    [
+      db.recipes,
+      db.malts,
+      db.hops,
+      db.mashSteps,
+      db.boilAdds,
+      db.ferments,
+      db.packagings,
+      db.recipeRevisions,
+      db.batchBindings
+    ],
     async () => {
       await db.recipes.bulkPut(RECIPES.map(rev));
       await db.malts.bulkPut(MALTS.map(rev));
@@ -82,6 +147,14 @@ export async function seedDatabase(): Promise<void> {
       await db.boilAdds.bulkPut(BOIL_ADDS.map(rev));
       await db.ferments.bulkPut(FERMENTS.map(rev));
       await db.packagings.bulkPut(PACKAGINGS.map(rev));
+      await db.recipeRevisions.bulkPut(buildRevisions());
+      await db.batchBindings.bulkPut(buildBindings());
     }
   );
+}
+
+/** 清空全部数据并重新灌入演示数据（清空逻辑在 db.ts，这里单向依赖避免循环引用） */
+export async function resetDatabase(): Promise<void> {
+  await clearAllTables();
+  await seedDatabase();
 }

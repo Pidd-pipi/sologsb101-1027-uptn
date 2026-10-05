@@ -25,6 +25,7 @@ import { BoilActions } from '../../core/state/boil/boil.actions';
 import { selectAllBoilAdds, selectBoilFilter } from '../../core/state/boil/boil.selectors';
 import { selectAllHops } from '../../core/state/ingredients/ingredients.selectors';
 import { selectAllRecipes, selectSelectedRecipe, selectSelectedRecipeId } from '../../core/state/recipe/recipe.selectors';
+import { selectAllRevisions } from '../../core/state/revision/revision.selectors';
 import { RecipeActions } from '../../core/state/recipe/recipe.actions';
 import { estimateIbu, purposeByAtMin } from '../../core/utils/brew';
 
@@ -74,11 +75,15 @@ import { estimateIbu, purposeByAtMin } from '../../core/utils/brew';
               <mat-label>选择配方</mat-label>
               <mat-select [value]="selectedRecipeId()" (selectionChange)="selectRecipe($event.value)">
                 @for (recipe of recipes(); track recipe.id) {
-                  <mat-option [value]="recipe.id">{{ recipe.name }}</mat-option>
+                  <mat-option [value]="recipe.id">{{ recipe.name }}（v{{ recipeLatestNo(recipe.id) }}）</mat-option>
                 }
               </mat-select>
             </mat-form-field>
             <span class="muted">煮沸总时长 {{ boilTotalMin }} 分钟</span>
+            <span class="rev-hint">
+              <strong>v{{ currentRevisionNo() }}</strong>
+              · 投加改动会生成不可回写的新修订，进行中批次仍按原修订的目标 IBU 计算
+            </span>
           </div>
         </mat-card-content>
       </mat-card>
@@ -191,6 +196,13 @@ import { estimateIbu, purposeByAtMin } from '../../core/utils/brew';
       .boil-recipe__select {
         width: 260px;
       }
+      .rev-hint {
+        font-size: 12px;
+        color: #1f3f7a;
+        background: #e7eef7;
+        border-radius: 999px;
+        padding: 4px 12px;
+      }
       .next-row {
         background: #fdf6dd;
       }
@@ -219,6 +231,18 @@ export class BoilTimelineComponent implements OnInit {
   readonly recipes = this.store.selectSignal(selectAllRecipes);
   readonly selectedRecipeId = this.store.selectSignal(selectSelectedRecipeId);
   readonly selectedRecipe = this.store.selectSignal(selectSelectedRecipe);
+  private readonly allRevisions = this.store.selectSignal(selectAllRevisions);
+
+  recipeLatestNo(recipeId: string): number {
+    return this.allRevisions()
+      .filter((item) => item.recipeId === recipeId)
+      .reduce((max, item) => Math.max(max, item.revisionNo), 0);
+  }
+
+  readonly currentRevisionNo = computed(() => {
+    const recipeId = this.selectedRecipeId() ?? this.recipes()[0]?.id ?? '';
+    return this.recipeLatestNo(recipeId);
+  });
 
   readonly selects: FilterSelectConfig[] = [
     { key: 'purposes', label: '用途', options: BOIL_PURPOSES.map((purpose) => ({ label: purpose, value: purpose })) }

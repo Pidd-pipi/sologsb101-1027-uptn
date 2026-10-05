@@ -14,6 +14,8 @@ import { ingredientsReducer } from './core/state/ingredients/ingredients.reducer
 import { mashReducer } from './core/state/mash/mash.reducer';
 import { boilReducer } from './core/state/boil/boil.reducer';
 import { packagingReducer } from './core/state/packaging/packaging.reducer';
+import { revisionReducer } from './core/state/revision/revision.reducer';
+import { RevisionEffects } from './core/state/revision/revision.effects';
 
 export const appConfig: ApplicationConfig = {
   providers: [
@@ -26,9 +28,10 @@ export const appConfig: ApplicationConfig = {
       ingredients: ingredientsReducer,
       mash: mashReducer,
       boil: boilReducer,
-      packaging: packagingReducer
+      packaging: packagingReducer,
+      revision: revisionReducer
     }),
-    provideEffects([RecipeEffects, FermentEffects]),
+    provideEffects([RecipeEffects, FermentEffects, RevisionEffects]),
     provideStoreDevtools({ maxAge: 25, logOnly: !isDevMode() })
   ]
 };

@@ -106,9 +106,13 @@ sologsb101-1027/
 
 ## 六、数据存储说明
 
-- **IndexedDB 库名**：`gbbrewhouse-db`（Dexie 封装），结构版本号 `version(1)`，并带 `upgrade()` 迁移逻辑（为历史行补齐行修订号与时间戳）。
-- **分表存储**：`recipes` 配方、`malts` 麦芽、`hops` 酒花、`mashSteps` 糖化步、`boilAdds` 煮沸投加、`ferments` 发酵读数、`packagings` 罐装批次，共 7 张表；每行带 `revision` / `createdAt` / `updatedAt`。
-- **首屏自动播种**：`core/utils/db.ts` 的 `initDatabase()` 在 `recipes` 表为空时调用 `seedDatabase()`，灌入互相引用的三层演示数据（配方 → 麦芽/酒花/糖化步/煮沸投加 → 发酵读数 → 罐装批次），保证 6 个页面首次打开都有内容；播种幂等。
-- **状态流**：页面只 `dispatch` NgRx actions 并 `select` 状态流，所有读写最终由 `core/services/recipe.service.ts` → `IdbTableService` → Dexie 落库，跨页状态不留在组件字段。
+- **IndexedDB 库名**：`gbbrewhouse-db`，结构版本号 `version(2)`。v1 → v2 带完整 `upgrade()` 迁移：为旧数据自动补齐**不可回写的配方修订快照**与**批次绑定**；补不齐（配方缺失 / 混批 / 孤儿记录）的批次标记为「待核对」。
+- **分表存储**：`recipes` 配方、`malts` 麦芽、`hops` 酒花、`mashSteps` 糖化步、`boilAdds` 煮沸投加、`ferments` 发酵读数、`packagings` 罐装批次、`recipeRevisions` 配方修订快照、`batchBindings` 批次绑定，共 9 张表；业务行带 `revision` / `createdAt` / `updatedAt`。
+- **配方修订快照（不可回写）**：酿酒师一旦改动配方（目标 OG/FG/IBU/EBC、麦芽、酒花、糖化步、煮沸投加），系统就把当期内容深拷贝成一条新的 `RecipeRevision`（版本号自增），历史快照永不被改写；内容无变化时不产生空修订。
+- **批次绑定与不重算**：每个发酵批次（按批次号）通过 `BatchBinding` 绑定到某条修订。批次读数的目标值（OG/FG/IBU 等）只取**绑定修订快照**，配方再怎么改，进行中批次都不会重算；批次要采用新配方，必须在发酵页点「重新确认」显式换到新修订。
+- **旧数据升级 / 待核对 / 罐装闸门**：升级或导入旧备份后会自动巡检（`RevisionService.reconcile()`）补齐快照与绑定；补不齐的批次显示「待核对」并在罐装登记时被强制拦截，人工重新确认后才放行。
+- **首屏自动播种**：`core/utils/db.ts` 的 `initDatabase(seeder)` 在 `recipes` 表为空时调用 `seedDatabase()`，灌入互相引用的三层演示数据（配方 → 麦芽/酒花/糖化步/煮沸投加/修订快照 → 发酵读数 → 罐装批次/批次绑定），保证 6 个页面首次打开都有内容；播种幂等。
+- **状态流**：页面只 `dispatch` NgRx actions 并 `select` 状态流，所有读写最终由 `core/services/recipe.service.ts` / `revision.service.ts` → `IdbTableService` → Dexie 落库，跨页状态不留在组件字段。
 - **无后端**：没有 API 服务、没有数据库容器；容器本身无状态，不挂载任何卷。
-- **级联规则**：删除配方会级联删除其麦芽、酒花、糖化步、煮沸投加、发酵读数与罐装批次。
+- **级联规则**：删除配方会级联删除其麦芽、酒花、糖化步、煮沸投加、发酵读数、罐装批次、全部修订快照与相关批次绑定。
+- **领域规则自检**：`frontend/scripts/verify-revisions.mts`（修订不可回写 / 旧批次不重算 / 重新确认 / 罐装闸门等 17 项）与 `verify-upgrade.mts`（v1→v2 迁移 11 项），用 `npx tsx <file>` 运行。

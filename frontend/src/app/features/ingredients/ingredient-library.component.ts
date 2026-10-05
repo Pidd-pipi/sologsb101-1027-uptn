@@ -21,6 +21,7 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
 import { selectFilteredHops, selectFilteredMalts, selectIngredientsFilter } from '../../core/state/ingredients/ingredients.selectors';
 import { IngredientsActions } from '../../core/state/ingredients/ingredients.actions';
 import { selectAllRecipes, selectSelectedRecipeId } from '../../core/state/recipe/recipe.selectors';
+import { selectAllRevisions } from '../../core/state/revision/revision.selectors';
 import { ebcColor as brewEbcColor, totalGrainKg, weightedEbc } from '../../core/utils/brew';
 
 @Component({
@@ -69,6 +70,16 @@ import { ebcColor as brewEbcColor, totalGrainKg, weightedEbc } from '../../core/
         (filtersChange)="onFilterChange($event)"
         (reset)="onResetFilter()"
       ></app-filter-bar>
+
+      <mat-card appearance="outlined">
+        <mat-card-content>
+          <span class="rev-hint">
+            <mat-icon inline>history</mat-icon>
+            麦芽 / 酒花投料一旦保存，配方会生成一份<strong>不可回写的新修订</strong>（当前配方
+            {{ currentRecipeName() }} 为 v{{ currentRevisionNo() }}）；进行中发酵批次仍绑定原修订，要采用新投料需在发酵页重新确认。
+          </span>
+        </mat-card-content>
+      </mat-card>
 
       @if (malts().length === 0 && hops().length === 0) {
         <app-empty-panel
@@ -256,6 +267,16 @@ import { ebcColor as brewEbcColor, totalGrainKg, weightedEbc } from '../../core/
         vertical-align: middle;
         border: 1px solid #ddd;
       }
+      .rev-hint {
+        font-size: 13px;
+        color: #1f3f7a;
+      }
+      .rev-hint mat-icon {
+        font-size: 16px;
+        width: 16px;
+        height: 16px;
+        vertical-align: middle;
+      }
     `
   ]
 })
@@ -273,6 +294,22 @@ export class IngredientLibraryComponent implements OnInit {
   readonly filter = this.store.selectSignal(selectIngredientsFilter);
   readonly recipes = this.store.selectSignal(selectAllRecipes);
   readonly selectedRecipeId = this.store.selectSignal(selectSelectedRecipeId);
+  private readonly allRevisions = this.store.selectSignal(selectAllRevisions);
+
+  private recipeLatestNo(recipeId: string): number {
+    return this.allRevisions()
+      .filter((item) => item.recipeId === recipeId)
+      .reduce((max, item) => Math.max(max, item.revisionNo), 0);
+  }
+
+  readonly currentRevisionNo = computed(() => {
+    const recipeId = this.selectedRecipeId() ?? this.recipes()[0]?.id ?? '';
+    return this.recipeLatestNo(recipeId);
+  });
+
+  readonly currentRecipeName = computed(
+    () => this.recipes().find((item) => item.id === (this.selectedRecipeId() ?? this.recipes()[0]?.id))?.name ?? '—'
+  );
 
   readonly selects: FilterSelectConfig[] = [
     { key: 'types', label: '麦芽类型', options: MALT_TYPES.map((type) => ({ label: type, value: type })) },

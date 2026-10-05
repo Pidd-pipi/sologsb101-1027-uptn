@@ -1,6 +1,6 @@
 /** /ferment 发酵比重与双乙酰还原跟踪：趋势读数与超温标记 */
 import { CommonModule } from '@angular/common';
-import { ChangeDetectionStrategy, Component, OnInit, computed, inject } from '@angular/core';
+import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
@@ -31,12 +31,16 @@ import { FermentActions } from '../../core/state/ferment/ferment.actions';
 import {
   selectAllFerments,
   selectBatchNumbers,
+  selectCurrentBatchBinding,
   selectCurrentBatchFerments,
   selectCurrentBatchMetrics,
+  selectCurrentBatchRevision,
   selectFermentFilter,
   selectSelectedBatchNo
 } from '../../core/state/ferment/ferment.selectors';
 import { selectAllRecipes, selectSelectedRecipeId } from '../../core/state/recipe/recipe.selectors';
+import { selectAllRevisions, selectPendingBindings } from '../../core/state/revision/revision.selectors';
+import { RevisionActions } from '../../core/state/revision/revision.actions';
 import { RecipeActions } from '../../core/state/recipe/recipe.actions';
 
 @Component({
@@ -93,6 +97,38 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
                 }
               </mat-select>
             </mat-form-field>
+
+            @if (binding(); as b) {
+              @if (b.status === '待核对') {
+                <span class="hint hint--err">
+                  <mat-icon inline>warning</mat-icon>
+                  绑定待核对{{ b.note ? '：' + b.note : '' }}
+                </span>
+                <button mat-stroked-button color="warn" type="button" (click)="openRebind()">重新确认绑定</button>
+              } @else {
+                <span class="hint hint--rev">
+                  <mat-icon inline>history</mat-icon>
+                  绑定修订 v{{ b.revisionNo }}（{{ boundRecipeName() }}）· 目标 OG/FG
+                  {{ boundRevision()?.recipe?.targetOg }} / {{ boundRevision()?.recipe?.targetFg }}
+                </span>
+                @if (behindLatest()) {
+                  <span class="hint hint--warn">
+                    <mat-icon inline>upgrade</mat-icon>
+                    配方已更新到 v{{ latestRevision()?.revisionNo }}，本批次仍按 v{{ b.revisionNo }} 计算
+                  </span>
+                  <button mat-stroked-button color="primary" type="button" (click)="adoptLatest()">
+                    重新确认采用 v{{ latestRevision()?.revisionNo }}
+                  </button>
+                }
+              }
+            } @else {
+              <span class="hint hint--err">
+                <mat-icon inline>warning</mat-icon>
+                该批次缺少配方修订绑定，罐装将被拦截
+              </span>
+              <button mat-stroked-button color="warn" type="button" (click)="openRebind()">补绑修订</button>
+            }
+
             @if (metrics().diacetylCleared) {
               <span class="hint hint--ok">双乙酰已低于阈值，可升温还原完成</span>
             } @else {
@@ -104,6 +140,17 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
           </div>
         </mat-card-content>
       </mat-card>
+
+      @if (pendingCount() > 0) {
+        <mat-card appearance="outlined" class="pending-card">
+          <mat-card-content>
+            <strong>有 {{ pendingCount() }} 条批次绑定待核对</strong>
+            <span class="muted">
+              ：旧数据升级后补不齐配方修订的批次会被拦住罐装。当前待核对批次：{{ pendingBatchNos() }}
+            </span>
+          </mat-card-content>
+        </mat-card>
+      }
 
       <app-filter-bar
         [filters]="filter()"
@@ -152,12 +199,13 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
                   <th>下降速率 / 日</th>
                   <th>阶段</th>
                   <th>记录</th>
+                  <th>绑定修订</th>
                   <th>操作</th>
                 </tr>
               </thead>
               <tbody>
                 @for (reading of currentReadings(); track reading.id) {
-                  <tr>
+                  <tr [class.row--pending]="binding()?.status === '待核对'">
                     <td>{{ reading.date }}</td>
                     <td>{{ reading.gravity }}</td>
                     <td [class.over-temp]="reading.tempC > 24">{{ reading.tempC }}</td>
@@ -165,6 +213,13 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
                     <td>{{ declineOf(reading.date) }}</td>
                     <td><app-style-tag [value]="reading.state"></app-style-tag></td>
                     <td class="muted">{{ reading.batchNo }}</td>
+                    <td>
+                      @if (binding(); as b) {
+                        <span class="rev-cell" [class.rev-cell--pending]="b.status === '待核对'">
+                          {{ b.status === '待核对' ? '待核对' : 'v' + b.revisionNo }}
+                        </span>
+                      }
+                    </td>
                     <td>
                       <button mat-button type="button" (click)="edit(reading)">编辑</button>
                       <button mat-button color="warn" type="button" (click)="remove(reading)">删除</button>
@@ -223,6 +278,43 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
           <mat-card-actions align="end">
             <button mat-button type="button" (click)="formVisible = false">取消</button>
             <button mat-flat-button color="primary" type="button" (click)="submit()">保存</button>
+          </mat-card-actions>
+        </mat-card>
+      }
+
+      @if (rebindVisible) {
+        <mat-card appearance="outlined" class="rebind-card">
+          <mat-card-header>
+            <mat-card-title>重新确认批次「{{ rebindBatchNo() }}」采用的配方修订</mat-card-title>
+          </mat-card-header>
+          <mat-card-content>
+            <p class="muted">
+              重新确认后，该批次后续的 OG/FG/IBU 等目标值将以所选修订快照为准；旧修订快照与历史读数都不会被改写。
+            </p>
+            <div class="form-grid">
+              <mat-form-field appearance="outline">
+                <mat-label>配方</mat-label>
+                <mat-select [(ngModel)]="rebindRecipeId" (selectionChange)="onRebindRecipeChange($event.value)">
+                  @for (recipe of recipes(); track recipe.id) {
+                    <mat-option [value]="recipe.id">{{ recipe.name }}（当前 v{{ recipeLatestNo(recipe.id) }}）</mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+              <mat-form-field appearance="outline">
+                <mat-label>修订</mat-label>
+                <mat-select [(ngModel)]="rebindRevisionId">
+                  @for (rev of rebindRevisionOptions(); track rev.id) {
+                    <mat-option [value]="rev.id">
+                      v{{ rev.revisionNo }} · {{ rev.note }}
+                    </mat-option>
+                  }
+                </mat-select>
+              </mat-form-field>
+            </div>
+          </mat-card-content>
+          <mat-card-actions align="end">
+            <button mat-button type="button" (click)="rebindVisible = false">取消</button>
+            <button mat-flat-button color="primary" type="button" (click)="confirmRebind()">确认绑定</button>
           </mat-card-actions>
         </mat-card>
       }
@@ -288,6 +380,30 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
         color: #c0392b;
         font-weight: 700;
       }
+      .hint--rev {
+        background: #e7eef7;
+        color: #1f3f7a;
+      }
+      .hint--err {
+        background: #fdecea;
+        color: #a5281b;
+      }
+      .pending-card {
+        border-left: 4px solid #c0392b;
+      }
+      .rev-cell {
+        font-weight: 700;
+        color: #1f3f7a;
+      }
+      .rev-cell--pending {
+        color: #a5281b;
+      }
+      .row--pending {
+        background: #fdf3f2;
+      }
+      .rebind-card {
+        border-left: 4px solid #3f6b3a;
+      }
     `
   ]
 })
@@ -308,6 +424,109 @@ export class FermentTrendComponent implements OnInit {
   readonly allFerments = this.store.selectSignal(selectAllFerments);
 
   readonly currentReadings = this.store.selectSignal(selectCurrentBatchFerments);
+  readonly binding = this.store.selectSignal(selectCurrentBatchBinding);
+  readonly boundRevision = this.store.selectSignal(selectCurrentBatchRevision);
+  readonly pendingBindings = this.store.selectSignal(selectPendingBindings);
+  readonly allRevisions = this.store.selectSignal(selectAllRevisions);
+
+  /** 当前批次绑定修订所属配方的展示名 */
+  readonly boundRecipeName = computed(() => {
+    const recipeId = this.binding()?.recipeId ?? this.currentReadings()[0]?.recipeId ?? '';
+    return this.recipes().find((item) => item.id === recipeId)?.name ?? '配方已删除';
+  });
+
+  /** 绑定配方的最新修订 */
+  readonly latestRevision = computed(() => {
+    const recipeId = this.binding()?.recipeId ?? this.currentReadings()[0]?.recipeId ?? '';
+    if (!recipeId) return null;
+    return (
+      this.allRevisions()
+        .filter((item) => item.recipeId === recipeId)
+        .sort((a, b) => b.revisionNo - a.revisionNo)[0] ?? null
+    );
+  });
+
+  /** 是否落后于最新修订（需要重新确认才能采用新配方） */
+  readonly behindLatest = computed(() => {
+    const b = this.binding();
+    const latest = this.latestRevision();
+    return Boolean(b && b.status === '已绑定' && latest && b.revisionNo < latest.revisionNo);
+  });
+
+  readonly pendingCount = computed(() => this.pendingBindings().length);
+  readonly pendingBatchNos = computed(() =>
+    this.pendingBindings()
+      .map((item) => item.batchNo)
+      .filter((batchNo) => batchNo.length > 0)
+      .join('、')
+  );
+
+  /* ------------------------- 批次重新确认（rebind） ------------------------- */
+  rebindVisible = false;
+  rebindBatchNo = signal('');
+  rebindRecipeId = '';
+  rebindRevisionId = '';
+
+  /** 待选配方的修订列表（供重新确认下拉使用，修订号倒序） */
+  readonly rebindRevisionOptions = computed(() =>
+    this.allRevisions()
+      .filter((item) => item.recipeId === this.rebindRecipeId)
+      .sort((a, b) => b.revisionNo - a.revisionNo)
+  );
+
+  recipeLatestNo(recipeId: string): number {
+    return this.allRevisions()
+      .filter((item) => item.recipeId === recipeId)
+      .reduce((max, item) => Math.max(max, item.revisionNo), 0);
+  }
+
+  openRebind(): void {
+    const batchNo = this.selectedBatchNo() ?? '';
+    const b = this.binding();
+    this.rebindBatchNo.set(batchNo);
+    this.rebindRecipeId = b?.recipeId || this.currentReadings()[0]?.recipeId || this.recipes()[0]?.id || '';
+    this.rebindRevisionId = b?.revisionId || '';
+    this.rebindVisible = true;
+    // 默认选最新修订
+    const options = this.rebindRevisionOptions();
+    if ((!this.rebindRevisionId || !options.some((item) => item.id === this.rebindRevisionId)) && options[0]) {
+      this.rebindRevisionId = options[0].id;
+    }
+  }
+
+  onRebindRecipeChange(recipeId: string): void {
+    this.rebindRecipeId = recipeId;
+    const latest = this.rebindRevisionOptions()[0];
+    this.rebindRevisionId = latest?.id ?? '';
+  }
+
+  /** 一键采用绑定配方的最新修订 */
+  adoptLatest(): void {
+    const b = this.binding();
+    const latest = this.latestRevision();
+    if (!b || !latest) return;
+    this.store.dispatch(
+      RevisionActions.rebindBatch({ batchNo: b.batchNo, recipeId: latest.recipeId, revisionId: latest.id })
+    );
+    this.snack.open(`批次「${b.batchNo}」已重新确认采用 v${latest.revisionNo}`, '关闭', { duration: 2600 });
+  }
+
+  confirmRebind(): void {
+    const batchNo = this.rebindBatchNo();
+    if (!batchNo || !this.rebindRecipeId || !this.rebindRevisionId) {
+      this.snack.open('请选择配方与修订', '关闭', { duration: 2200 });
+      return;
+    }
+    this.store.dispatch(
+      RevisionActions.rebindBatch({
+        batchNo,
+        recipeId: this.rebindRecipeId,
+        revisionId: this.rebindRevisionId
+      })
+    );
+    this.rebindVisible = false;
+    this.snack.open(`批次「${batchNo}」已重新确认绑定`, '关闭', { duration: 2400 });
+  }
 
   readonly selects: FilterSelectConfig[] = [
     { key: 'states', label: '阶段', options: FERMENT_STATES.map((state) => ({ label: state, value: state })) }

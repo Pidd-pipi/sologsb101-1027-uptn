@@ -18,6 +18,7 @@ import { StyleTagComponent } from '../../shared/components/style-tag/style-tag.c
 import { BEER_STYLES, createEmptyRecipe, type Recipe } from '../../core/models/recipe.model';
 import { filtersToQueryParams, queryParamsToFilters, type FilterModel, type FilterSelectConfig } from '../../core/models/filter.model';
 import { RecipeActions } from '../../core/state/recipe/recipe.actions';
+import { RevisionActions } from '../../core/state/revision/revision.actions';
 import {
   selectFilteredRecipes,
   selectRecipeError,
@@ -25,6 +26,12 @@ import {
   selectRecipeLoading,
   selectSelectedRecipe
 } from '../../core/state/recipe/recipe.selectors';
+import {
+  selectAllBindings,
+  selectAllRevisions,
+  selectPendingBindings,
+  type BatchBindingView
+} from '../../core/state/revision/revision.selectors';
 import { selectAllMalts } from '../../core/state/ingredients/ingredients.selectors';
 import { selectAllFerments } from '../../core/state/ferment/ferment.selectors';
 import { selectAllPackagings } from '../../core/state/packaging/packaging.selectors';
@@ -64,10 +71,23 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
 
       <div class="badge-row">
         <app-stat-badge label="配方数" [value]="recipes().length" suffix="个" tone="primary" icon="menu_book" />
+        <app-stat-badge label="配方修订总数" [value]="allRevisions().length" suffix="份" tone="info" icon="history" />
         <app-stat-badge label="平均目标 IBU" [value]="avgTargetIbu()" suffix="IBU" tone="warning" icon="bolt" />
         <app-stat-badge label="平均目标 OG" [value]="avgTargetOg()" tone="info" icon="water_drop" />
+        <app-stat-badge label="待核对绑定" [value]="pendingBindings().length" suffix="个" tone="danger" icon="warning" />
         <app-stat-badge label="已罐装配方" [value]="packagedRecipeCount()" suffix="个" tone="success" icon="inventory_2" />
       </div>
+
+      @if (pendingBindings().length > 0) {
+        <mat-card appearance="outlined" class="rev-banner rev-banner--warn">
+          <mat-card-content>
+            <strong>有 {{ pendingBindings().length }} 条批次绑定待核对</strong>
+            <span class="muted">
+              ：旧数据升级后存在补不齐配方修订的批次（{{ pendingBatchNos() }}），这些批次已被拦住罐装，请到发酵页逐条重新确认。
+            </span>
+          </mat-card-content>
+        </mat-card>
+      }
 
       <app-filter-bar
         [filters]="filter()"
@@ -100,6 +120,7 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
                 <mat-card-title>{{ recipe.name }}</mat-card-title>
                 <mat-card-subtitle>
                   <app-style-tag [value]="recipe.style"></app-style-tag>
+                  <span class="rev-chip">当前 v{{ latestNo(recipe.id) }}</span>
                   <span class="muted">批次 {{ recipe.batchSizeL }} L</span>
                 </mat-card-subtitle>
               </mat-card-header>
@@ -132,12 +153,38 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
                       <th>投料量</th>
                       <td>{{ grainKg(recipe) }} kg · 麦芽 {{ maltCount(recipe.id) }} 条</td>
                     </tr>
+                    <tr>
+                      <th>修订 / 影响批次</th>
+                      <td>
+                        <span class="muted">{{ revisionCount(recipe.id) }} 份快照 · 绑定批次 {{ impact(recipe.id).length }} 个</span>
+                        @if (impact(recipe.id).length > 0) {
+                          <span class="impact-line">
+                            @for (view of impact(recipe.id); track view.batchNo) {
+                              <span class="impact-tag" [class.impact-tag--pending]="view.status === '待核对'" [class.impact-tag--behind]="view.behind">
+                                {{ view.batchNo }}·v{{ view.revisionNo || '?' }}{{ view.status === '待核对' ? '（待核对）' : view.behind ? '（落后）' : '' }}
+                              </span>
+                            }
+                          </span>
+                        }
+                      </td>
+                    </tr>
                   </tbody>
                 </table>
+                @if (revisionList(recipe.id).length > 0) {
+                  <div class="rev-list">
+                    <div class="rev-list__head">配方修订（不可回写）</div>
+                    @for (rev of revisionList(recipe.id).slice(0, 3); track rev.id) {
+                      <div class="rev-list__item">
+                        <span class="rev-chip rev-chip--solid">v{{ rev.revisionNo }}</span>
+                        <span class="muted">{{ rev.note }}</span>
+                      </div>
+                    }
+                  </div>
+                }
               </mat-card-content>
               <mat-card-actions align="end">
                 <button mat-button type="button" (click)="select(recipe.id)">设为当前</button>
-                <button mat-button type="button" (click)="edit(recipe)">编辑</button>
+                <button mat-button type="button" (click)="edit(recipe)">改配方出新修订</button>
                 <button mat-button color="warn" type="button" (click)="remove(recipe)">删除</button>
               </mat-card-actions>
             </mat-card>
@@ -148,9 +195,16 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
       @if (formVisible) {
         <mat-card appearance="outlined">
           <mat-card-header>
-            <mat-card-title>{{ editingId ? '编辑配方' : '新建配方' }}</mat-card-title>
+            <mat-card-title>{{ editingId ? '改配方（保存即生成不可回写的新修订）' : '新建配方' }}</mat-card-title>
           </mat-card-header>
           <mat-card-content>
+            @if (editingId) {
+              <div class="rev-banner">
+                <mat-icon inline>history</mat-icon>
+                保存会基于当前目标值、麦芽、酒花、糖化步与煮沸投加生成一份新修订（当前 v{{ latestNo(editingId) }}）；
+                <strong>进行中批次仍绑定原修订，不会重算</strong>，批次要采用新配方需到发酵页重新确认。
+              </div>
+            }
             <div class="form-grid">
               <mat-form-field appearance="outline">
                 <mat-label>配方名称</mat-label>
@@ -184,16 +238,97 @@ import { abvFromGravity, apparentAttenuation, ebcDeviation, totalGrainKg } from 
                 <mat-label>批次体积 L</mat-label>
                 <input matInput type="number" [(ngModel)]="form.batchSizeL" />
               </mat-form-field>
+              @if (editingId) {
+                <mat-form-field appearance="outline" class="full">
+                  <mat-label>修订说明（可选，留空自动生成变更摘要）</mat-label>
+                  <input matInput [(ngModel)]="revisionNote" placeholder="如：提高苦度到 65 IBU，配合新版干投酒花" />
+                </mat-form-field>
+              }
             </div>
           </mat-card-content>
           <mat-card-actions align="end">
             <button mat-button type="button" (click)="formVisible = false">取消</button>
-            <button mat-flat-button color="primary" type="button" (click)="submit()">保存</button>
+            <button mat-flat-button color="primary" type="button" (click)="submit()">
+              {{ editingId ? '保存并生成新修订' : '保存' }}
+            </button>
           </mat-card-actions>
         </mat-card>
       }
     </div>
-  `
+  `,
+  styles: [
+    `
+      .rev-chip {
+        display: inline-flex;
+        align-items: center;
+        padding: 1px 8px;
+        margin: 0 4px;
+        border-radius: 999px;
+        background: #eef3ea;
+        color: #3f6b3a;
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .rev-chip--solid {
+        background: #3f6b3a;
+        color: #fff;
+        margin: 0 6px 0 0;
+      }
+      .rev-banner {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: #eef3ea;
+        border-radius: 8px;
+        padding: 10px 14px;
+        font-size: 13px;
+        color: #33402c;
+      }
+      .rev-banner--warn {
+        background: #fdecea;
+        color: #a5281b;
+      }
+      .impact-line {
+        display: inline-flex;
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-left: 6px;
+      }
+      .impact-tag {
+        display: inline-block;
+        padding: 1px 8px;
+        border-radius: 999px;
+        background: #eef3ea;
+        color: #3f6b3a;
+        font-size: 11px;
+        font-weight: 600;
+      }
+      .impact-tag--behind {
+        background: #fbe6c8;
+        color: #7a4a12;
+      }
+      .impact-tag--pending {
+        background: #fdecea;
+        color: #a5281b;
+      }
+      .rev-list {
+        margin-top: 10px;
+        border-top: 1px dashed var(--brew-border);
+        padding-top: 8px;
+      }
+      .rev-list__head {
+        font-size: 12px;
+        font-weight: 700;
+        color: #3f6b3a;
+        margin-bottom: 4px;
+      }
+      .rev-list__item {
+        display: flex;
+        align-items: center;
+        padding: 2px 0;
+      }
+    `
+  ]
 })
 export class RecipeListComponent implements OnInit {
   private readonly store = inject(Store);
@@ -212,9 +347,15 @@ export class RecipeListComponent implements OnInit {
   private readonly allFerments = this.store.selectSignal(selectAllFerments);
   private readonly allPackagings = this.store.selectSignal(selectAllPackagings);
 
+  readonly allRevisions = this.store.selectSignal(selectAllRevisions);
+  readonly allBindings = this.store.selectSignal(selectAllBindings);
+  readonly pendingBindings = this.store.selectSignal(selectPendingBindings);
+
   formVisible = false;
   editingId: string | null = null;
   form: Omit<Recipe, 'id'> = createEmptyRecipe();
+  /** 配方修改时的修订说明（可选） */
+  revisionNote = '';
 
   readonly selects: FilterSelectConfig[] = [
     { key: 'styles', label: '风格', options: BEER_STYLES.map((style) => ({ label: style, value: style })) }
@@ -233,6 +374,45 @@ export class RecipeListComponent implements OnInit {
   readonly packagedRecipeCount = computed(
     () => new Set(this.allPackagings().map((item) => item.recipeId)).size
   );
+
+  /** 待核对批次号（去掉孤儿提醒的空批次号） */
+  readonly pendingBatchNos = computed(() =>
+    this.pendingBindings()
+      .map((item) => item.batchNo)
+      .filter((batchNo) => batchNo.length > 0)
+      .join('、')
+  );
+
+  /** 某配方的修订列表（修订号倒序） */
+  revisionList(recipeId: string) {
+    return this.allRevisions()
+      .filter((item) => item.recipeId === recipeId)
+      .sort((a, b) => b.revisionNo - a.revisionNo);
+  }
+
+  latestNo(recipeId: string): number {
+    return this.revisionList(recipeId)[0]?.revisionNo ?? 0;
+  }
+
+  revisionCount(recipeId: string): number {
+    return this.revisionList(recipeId).length;
+  }
+
+  /** 某配方当前的批次绑定影响范围 */
+  impact(recipeId: string): BatchBindingView[] {
+    const latestNo = this.latestNo(recipeId);
+    return this.allBindings()
+      .filter((item) => item.batchNo && item.recipeId === recipeId)
+      .map((item) => ({
+        batchNo: item.batchNo,
+        revisionNo: item.revisionNo,
+        status: item.status,
+        latestNo,
+        behind: item.status === '已绑定' && item.revisionNo < latestNo,
+        note: item.note
+      }))
+      .sort((a, b) => a.batchNo.localeCompare(b.batchNo));
+  }
 
   ngOnInit(): void {
     this.store.dispatch(RecipeActions.reloadAll());
@@ -292,11 +472,13 @@ export class RecipeListComponent implements OnInit {
   openCreate(): void {
     this.editingId = null;
     this.form = createEmptyRecipe();
+    this.revisionNote = '';
     this.formVisible = true;
   }
 
   edit(recipe: Recipe): void {
     this.editingId = recipe.id;
+    this.revisionNote = '';
     this.form = {
       name: recipe.name,
       style: recipe.style,
@@ -315,12 +497,20 @@ export class RecipeListComponent implements OnInit {
       return;
     }
     if (this.editingId) {
-      this.store.dispatch(RecipeActions.updateRecipe({ id: this.editingId, patch: { ...this.form } }));
+      // 配方改动收口为不可回写的修订快照；没有实际变化时服务端会自动跳过空修订
+      this.store.dispatch(
+        RevisionActions.commitRecipe({
+          id: this.editingId,
+          patch: { ...this.form },
+          note: this.revisionNote.trim() || undefined
+        })
+      );
+      this.snack.open('配方已保存为新修订，进行中批次仍绑定原修订', '关闭', { duration: 2800 });
     } else {
       this.store.dispatch(RecipeActions.createRecipe({ payload: { ...this.form } }));
+      this.snack.open('配方已建档（v1 初始修订）', '关闭', { duration: 2200 });
     }
     this.formVisible = false;
-    this.snack.open('配方已保存', '关闭', { duration: 2000 });
   }
 
   remove(recipe: Recipe): void {

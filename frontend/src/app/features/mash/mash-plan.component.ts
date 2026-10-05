@@ -26,6 +26,7 @@ import {
 import { MashActions } from '../../core/state/mash/mash.actions';
 import { selectAllMashSteps, selectMashFilter } from '../../core/state/mash/mash.selectors';
 import { selectAllRecipes, selectSelectedRecipeId } from '../../core/state/recipe/recipe.selectors';
+import { selectAllRevisions } from '../../core/state/revision/revision.selectors';
 import { RecipeActions } from '../../core/state/recipe/recipe.actions';
 
 @Component({
@@ -75,10 +76,14 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
               <mat-label>选择配方</mat-label>
               <mat-select [value]="selectedRecipeId()" (selectionChange)="selectRecipe($event.value)">
                 @for (recipe of recipes(); track recipe.id) {
-                  <mat-option [value]="recipe.id">{{ recipe.name }}</mat-option>
+                  <mat-option [value]="recipe.id">{{ recipe.name }}（v{{ recipeLatestNo(recipe.id) }}）</mat-option>
                 }
               </mat-select>
             </mat-form-field>
+            <span class="rev-hint">
+              <strong>v{{ currentRevisionNo() }}</strong>
+              · 调整升温步 / 拖拽调序都会生成不可回写的新修订，进行中批次仍绑定原修订
+            </span>
           </div>
         </mat-card-content>
       </mat-card>
@@ -184,6 +189,13 @@ import { RecipeActions } from '../../core/state/recipe/recipe.actions';
       .mash-recipe__select {
         width: 260px;
       }
+      .rev-hint {
+        font-size: 12px;
+        color: #1f3f7a;
+        background: #e7eef7;
+        border-radius: 999px;
+        padding: 4px 12px;
+      }
       .mash-list {
         display: flex;
         flex-direction: column;
@@ -226,6 +238,18 @@ export class MashPlanComponent implements OnInit {
   readonly filter = this.store.selectSignal(selectMashFilter);
   readonly recipes = this.store.selectSignal(selectAllRecipes);
   readonly selectedRecipeId = this.store.selectSignal(selectSelectedRecipeId);
+  private readonly allRevisions = this.store.selectSignal(selectAllRevisions);
+
+  recipeLatestNo(recipeId: string): number {
+    return this.allRevisions()
+      .filter((item) => item.recipeId === recipeId)
+      .reduce((max, item) => Math.max(max, item.revisionNo), 0);
+  }
+
+  readonly currentRevisionNo = computed(() => {
+    const recipeId = this.selectedRecipeId() ?? this.recipes()[0]?.id ?? '';
+    return this.recipeLatestNo(recipeId);
+  });
 
   readonly selects: FilterSelectConfig[] = [
     { key: 'states', label: '状态', options: MASH_STATES.map((state) => ({ label: state, value: state })) }

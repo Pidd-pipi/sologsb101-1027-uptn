@@ -16,7 +16,9 @@ import { selectAllRecipes } from './core/state/recipe/recipe.selectors';
 import { selectAllFerments } from './core/state/ferment/ferment.selectors';
 import { selectAllPackagings } from './core/state/packaging/packaging.selectors';
 import { selectAllMalts, selectAllHops } from './core/state/ingredients/ingredients.selectors';
+import { selectAllBindings, selectAllRevisions, selectPendingBindings } from './core/state/revision/revision.selectors';
 import { countAll, DB_NAME, DB_SCHEMA_VERSION, initDatabase } from './core/utils/db';
+import { seedDatabase } from './core/utils/seed';
 
 @Component({
   selector: 'app-root',
@@ -63,6 +65,10 @@ import { countAll, DB_NAME, DB_SCHEMA_VERSION, initDatabase } from './core/utils
           <div>本地库 {{ dbName }} · v{{ schemaVersion }}</div>
           <div>配方 {{ recipeCount() }} · 麦芽 {{ maltCount() }} · 酒花 {{ hopCount() }}</div>
           <div>发酵读数 {{ fermentCount() }} · 罐装 {{ packagingCount() }}</div>
+          <div>修订快照 {{ revisionCount() }} · 批次绑定 {{ bindingCount() }}</div>
+          @if (pendingCount() > 0) {
+            <div class="shell__warn">⚠ {{ pendingCount() }} 条绑定待核对，已拦罐装</div>
+          }
           <div>{{ dbReady() ? '本地库已就绪' : '正在打开本地库…' }}</div>
         </div>
       </mat-sidenav>
@@ -121,6 +127,10 @@ import { countAll, DB_NAME, DB_SCHEMA_VERSION, initDatabase } from './core/utils
         line-height: 1.9;
         color: rgba(238, 243, 234, 0.6);
       }
+      .shell__warn {
+        color: #ffb4a2;
+        font-weight: 700;
+      }
       .shell__content {
         background: var(--brew-bg);
       }
@@ -167,11 +177,14 @@ export class AppComponent implements OnInit {
   readonly hopCount = computed(() => this.store.selectSignal(selectAllHops)());
   readonly fermentCount = computed(() => this.store.selectSignal(selectAllFerments)());
   readonly packagingCount = computed(() => this.store.selectSignal(selectAllPackagings)());
+  readonly revisionCount = computed(() => this.store.selectSignal(selectAllRevisions)().length);
+  readonly bindingCount = computed(() => this.store.selectSignal(selectAllBindings)().length);
+  readonly pendingCount = computed(() => this.store.selectSignal(selectPendingBindings)().length);
 
   ngOnInit(): void {
     void (async () => {
       try {
-        await initDatabase();
+        await initDatabase(seedDatabase);
         this.dbReady.set(true);
         await countAll();
         this.store.dispatch(RecipeActions.reloadAll());

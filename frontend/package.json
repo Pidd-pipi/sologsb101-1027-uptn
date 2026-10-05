@@ -7,7 +7,11 @@
     "ng": "ng",
     "start": "ng serve --port 22827",
     "build": "ng build",
-    "watch": "ng build --watch --configuration development"
+    "watch": "ng build --watch --configuration development",
+    "verify": "tsx scripts/verify-revisions.mts && tsx scripts/verify-upgrade.mts && tsx scripts/verify-edge.mts",
+    "verify:revisions": "tsx scripts/verify-revisions.mts",
+    "verify:upgrade": "tsx scripts/verify-upgrade.mts",
+    "verify:edge": "tsx scripts/verify-edge.mts"
   },
   "dependencies": {
     "@angular/animations": "^18.2.0",
@@ -32,6 +36,8 @@
     "@angular-devkit/build-angular": "^18.2.0",
     "@angular/cli": "^18.2.0",
     "@angular/compiler-cli": "^18.2.0",
+    "fake-indexeddb": "^6.2.5",
+    "tsx": "^4.23.15",
     "typescript": "~5.5.4"
   }
 }

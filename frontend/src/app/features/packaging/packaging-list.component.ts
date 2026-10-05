@@ -1,6 +1,6 @@
 /** /packaging 罐装批次登记与结构版本导出：本地库版本查看与 JSON 导入导出 */
 import { CommonModule } from '@angular/common';
-import { ChangeDetectionStrategy, Component, OnInit, computed, inject, signal } from '@angular/core';
+import { ChangeDetectionStrategy, Component, OnInit, computed, effect, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
@@ -23,8 +23,9 @@ import {
 } from '../../core/models/filter.model';
 import { PackagingActions } from '../../core/state/packaging/packaging.actions';
 import { selectAllPackagings, selectFilteredPackagings, selectPackagingFilter } from '../../core/state/packaging/packaging.selectors';
-import { selectAllFerments } from '../../core/state/ferment/ferment.selectors';
+import { selectAllFerments, selectFermentError } from '../../core/state/ferment/ferment.selectors';
 import { selectAllRecipes, selectSelectedRecipeId } from '../../core/state/recipe/recipe.selectors';
+import { selectAllBindings, selectAllRevisions, selectPendingBindings } from '../../core/state/revision/revision.selectors';
 import { RecipeActions } from '../../core/state/recipe/recipe.actions';
 import { FermentActions } from '../../core/state/ferment/ferment.actions';
 import {
@@ -34,10 +35,10 @@ import {
   exportSnapshot,
   importSnapshot,
   initDatabase,
-  resetDatabase,
   type DatabaseSnapshot,
   type PackagingRow
 } from '../../core/utils/db';
+import { resetDatabase, seedDatabase } from '../../core/utils/seed';
 import {
   buildRecipeArchive,
   downloadJson,
@@ -82,11 +83,22 @@ import { abvFromGravity } from '../../core/utils/brew';
 
       <div class="badge-row">
         <app-stat-badge label="罐装批次" [value]="filtered().length" suffix="个" tone="primary" icon="inventory_2" />
+        <app-stat-badge label="待核对绑定" [value]="pendingBindings().length" suffix="个" tone="danger" icon="warning" />
         <app-stat-badge label="总数量" [value]="totalQuantity()" tone="warning" icon="numbers" />
         <app-stat-badge label="平均酒精度" [value]="avgAbv()" suffix="%vol" tone="danger" icon="local_bar" />
         <app-stat-badge label="平均二氧化碳" [value]="avgCarbonation()" suffix="vol" tone="info" icon="bubble_chart" />
         <app-stat-badge label="覆盖配方" [value]="recipeCoverage()" suffix="个" tone="success" icon="menu_book" />
       </div>
+
+      @if (pendingBindings().length > 0) {
+        <mat-card appearance="outlined" class="pack-warn">
+          <mat-card-content>
+            <mat-icon inline>warning</mat-icon>
+            <strong>{{ pendingBindings().length }} 条批次绑定待核对，罐装已被拦截：</strong>
+            <span class="muted">{{ pendingBatchNos() }}。请先到发酵页重新确认配方修订，再回来登记罐装。</span>
+          </mat-card-content>
+        </mat-card>
+      }
 
       <app-filter-bar
         [filters]="filter()"
@@ -111,6 +123,7 @@ import { abvFromGravity } from '../../core/utils/brew';
                 <tr>
                   <th>批次号</th>
                   <th>配方</th>
+                  <th>绑定修订</th>
                   <th>罐装日期</th>
                   <th>容器</th>
                   <th>数量</th>
@@ -122,15 +135,24 @@ import { abvFromGravity } from '../../core/utils/brew';
               </thead>
               <tbody>
                 @for (row of filtered(); track row.id) {
-                  <tr>
+                  <tr [class.row--pending]="bindingOf(row.batchNo)?.status === '待核对'">
                     <td>{{ row.batchNo }}</td>
                     <td>{{ recipeName(row.recipeId) }}</td>
+                    <td>
+                      @if (bindingOf(row.batchNo); as b) {
+                        <span class="rev-cell" [class.rev-cell--pending]="b.status === '待核对'">
+                          {{ b.status === '待核对' ? '待核对' : 'v' + b.revisionNo }}
+                        </span>
+                      } @else {
+                        <span class="rev-cell rev-cell--pending">缺绑定</span>
+                      }
+                    </td>
                     <td>{{ row.packDate }}</td>
                     <td>{{ row.container }}</td>
                     <td>{{ row.quantity }}</td>
                     <td>{{ row.carbonationVol }}</td>
                     <td>{{ row.abv }} %vol</td>
-                    <td>{{ realizedOg(row.recipeId) }} / {{ realizedFg(row.recipeId) }}</td>
+                    <td>{{ realizedOgForBatch(row.batchNo) }} / {{ realizedFgForBatch(row.batchNo) }}</td>
                     <td>
                       <button mat-button type="button" (click)="edit(row)">编辑</button>
                       <button mat-button color="warn" type="button" (click)="remove(row)">删除</button>
@@ -186,11 +208,18 @@ import { abvFromGravity } from '../../core/utils/brew';
               </mat-form-field>
             </div>
             <p class="muted">提示：选择批次号后会自动按该批次发酵读数回算 ABV（当前建议值 {{ suggestedAbv() }} %vol）。</p>
+            @if (formGuardMessage(); as guard) {
+              <p class="pack-guard"><mat-icon inline>warning</mat-icon>{{ guard }}</p>
+            } @else {
+              <p class="pack-ok"><mat-icon inline>check_circle</mat-icon>批次已绑定配方修订，允许罐装。</p>
+            }
           </mat-card-content>
           <mat-card-actions align="end">
             <button mat-button type="button" (click)="formVisible = false">取消</button>
             <button mat-button type="button" (click)="fillAbv()">按读数回算 ABV</button>
-            <button mat-flat-button color="primary" type="button" (click)="submit()">保存</button>
+            <button mat-flat-button color="primary" type="button" (click)="submit()" [disabled]="formGuardMessage() !== ''">
+              保存
+            </button>
           </mat-card-actions>
         </mat-card>
       }
@@ -240,6 +269,15 @@ import { abvFromGravity } from '../../core/utils/brew';
                   <th>发酵读数 / 罐装批次</th>
                   <td>{{ counts['ferments'] || 0 }} / {{ counts['packagings'] || 0 }}</td>
                 </tr>
+                <tr>
+                  <th>修订快照 / 批次绑定</th>
+                  <td>
+                    {{ counts['recipeRevisions'] || 0 }} / {{ counts['batchBindings'] || 0 }}
+                    @if (pendingBindings().length > 0) {
+                      <span class="rev-cell rev-cell--pending">（待核对 {{ pendingBindings().length }}）</span>
+                    }
+                  </td>
+                </tr>
               </tbody>
             </table>
             <div class="archive-actions">
@@ -287,6 +325,27 @@ import { abvFromGravity } from '../../core/utils/brew';
         font-size: 12px;
         margin-bottom: 8px;
       }
+      .pack-warn {
+        border-left: 4px solid #c0392b;
+      }
+      .pack-guard {
+        color: #a5281b;
+        font-size: 13px;
+      }
+      .pack-ok {
+        color: #1e8449;
+        font-size: 13px;
+      }
+      .rev-cell {
+        font-weight: 700;
+        color: #1f3f7a;
+      }
+      .rev-cell--pending {
+        color: #a5281b;
+      }
+      .row--pending {
+        background: #fdf3f2;
+      }
     `
   ]
 })
@@ -306,6 +365,46 @@ export class PackagingListComponent implements OnInit {
   readonly recipes = this.store.selectSignal(selectAllRecipes);
   readonly selectedRecipeId = this.store.selectSignal(selectSelectedRecipeId);
   private readonly ferments = this.store.selectSignal(selectAllFerments);
+  readonly bindings = this.store.selectSignal(selectAllBindings);
+  readonly allRevisions = this.store.selectSignal(selectAllRevisions);
+  readonly pendingBindings = this.store.selectSignal(selectPendingBindings);
+  private readonly saveError = this.store.selectSignal(selectFermentError);
+
+  constructor() {
+    // 服务层罐装闸门（待核对 / 缺绑定）兜底：万一越过表单校验，仍以提示条明确告知
+    effect(() => {
+      const message = this.saveError();
+      if (message) this.snack.open(message, '关闭', { duration: 3200 });
+    });
+  }
+
+  readonly pendingBatchNos = computed(() =>
+    this.pendingBindings()
+      .map((item) => item.batchNo)
+      .filter((batchNo) => batchNo.length > 0)
+      .join('、')
+  );
+
+  /** 某批次的绑定 */
+  bindingOf(batchNo: string) {
+    return this.bindings().find((item) => item.batchNo === batchNo);
+  }
+
+  /** 表单态的罐装闸门：返回非空字符串表示被拦截的原因 */
+  readonly formGuardMessage = computed(() => {
+    const { batchNo, recipeId } = this.form;
+    if (!batchNo.trim() || !recipeId) return '';
+    const binding = this.bindings().find((item) => item.batchNo === batchNo);
+    if (!binding) return `批次「${batchNo}」缺少配方修订绑定，请到发酵页核对后再罐装。`;
+    if (binding.status === '待核对') return `批次「${batchNo}」绑定待核对${binding.note ? '：' + binding.note : ''}，请到发酵页重新确认。`;
+    if (!binding.revisionId || !this.allRevisions().some((item) => item.id === binding.revisionId)) {
+      return `批次「${batchNo}」绑定的修订快照已缺失，请到发酵页重新确认。`;
+    }
+    if (binding.recipeId && recipeId !== binding.recipeId) {
+      return `批次「${batchNo}」绑定的是另一个配方，请核对所选配方。`;
+    }
+    return '';
+  });
 
   readonly selects: FilterSelectConfig[] = [
     { key: 'containers', label: '容器', options: CONTAINER_TYPES.map((item) => ({ label: item, value: item })) }
@@ -343,7 +442,7 @@ export class PackagingListComponent implements OnInit {
   async ngOnInit(): Promise<void> {
     // 首次访问时本地库还在播种演示数据：必须先等 initDatabase() 完成，
     // 否则 countAll() 会读到空库并把「结构版本与整库备份」统计永久显示成 0。
-    await initDatabase();
+    await initDatabase(seedDatabase);
     this.store.dispatch(RecipeActions.reloadAll());
     this.store.dispatch(FermentActions.loadFerments());
     const params: Record<string, string | undefined> = {};
@@ -370,12 +469,29 @@ export class PackagingListComponent implements OnInit {
     return { og: rows[0].gravity, fg: rows[rows.length - 1].gravity };
   }
 
+  /** 按批次号取实绩 OG/FG（罐装批次维度） */
+  private realizedForBatch(batchNo: string): { og: number; fg: number } {
+    const rows = this.ferments()
+      .filter((item) => item.batchNo === batchNo)
+      .sort((a, b) => a.date.localeCompare(b.date));
+    if (rows.length === 0) return { og: 0, fg: 0 };
+    return { og: rows[0].gravity, fg: rows[rows.length - 1].gravity };
+  }
+
   realizedOg(recipeId: string): number {
     return this.realized(recipeId).og;
   }
 
   realizedFg(recipeId: string): number {
     return this.realized(recipeId).fg;
+  }
+
+  realizedOgForBatch(batchNo: string): number {
+    return this.realizedForBatch(batchNo).og;
+  }
+
+  realizedFgForBatch(batchNo: string): number {
+    return this.realizedForBatch(batchNo).fg;
   }
 
   private abvForBatch(batchNo: string, recipeId: string): number {
@@ -420,6 +536,12 @@ export class PackagingListComponent implements OnInit {
   submit(): void {
     if (!this.form.recipeId || !this.form.batchNo.trim()) {
       this.snack.open('请选择配方并填写批次号', '关闭', { duration: 2200 });
+      return;
+    }
+    // 罐装闸门：绑定缺失 / 待核对 / 修订快照丢失 / 配方不一致一律拦住（服务层会再次兜底）
+    const guard = this.formGuardMessage();
+    if (guard) {
+      this.snack.open(guard, '关闭', { duration: 3200 });
       return;
     }
     if (this.editingId) {
